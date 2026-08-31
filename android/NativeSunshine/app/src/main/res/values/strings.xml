@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">NativeSunshine</string>
+    <string name="status_waiting">⏳ Waiting for host…\n\nRun native-sunshine.sh on your Linux machine\nwith USB cable connected.</string>
+    <string name="status_connecting">🔗 Host connected — starting decode…</string>
+    <string name="status_streaming">▶ Streaming</string>
+    <string name="status_error">⚠ Error: %1$s\n\nReconnecting…</string>
+    <string name="notification_channel_name">NativeSunshine Stream</string>
+</resources>

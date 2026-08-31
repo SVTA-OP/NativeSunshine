@@ -1,0 +1,200 @@
+package dev.nativesunshine
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import android.view.Surface
+import androidx.core.app.NotificationCompat
+
+private const val TAG = "NS:ReceiverService"
+private const val CHANNEL_ID = "native_sunshine_stream"
+private const val NOTIFICATION_ID = 1
+
+/**
+ * ReceiverService — foreground service that owns the streaming pipeline.
+ *
+ * Lifecycle:
+ *  1. Started as a foreground service from MainActivity
+ *  2. Bound by MainActivity to exchange the Surface reference
+ *  3. Owns SocketReader (TCP server) and StreamDecoder (MediaCodec)
+ *  4. Coordinates handoff: SocketReader feeds data → StreamDecoder renders to Surface
+ *  5. Restarts the socket listener automatically on disconnect
+ *
+ * The service continues running even if the activity is backgrounded,
+ * so the stream stays alive when the user switches apps.
+ */
+class ReceiverService : Service() {
+
+    // ── Binder ────────────────────────────────────────────────────────────────
+    inner class LocalBinder : Binder() {
+        fun getService(): ReceiverService = this@ReceiverService
+    }
+    private val binder = LocalBinder()
+
+    // ── Pipeline components ───────────────────────────────────────────────────
+    private var socketReader: SocketReader? = null
+    private var streamDecoder: StreamDecoder? = null
+
+    // Volatile so MainActivity's UI thread sees updates from the service thread
+    @Volatile private var currentSurface: Surface? = null
+    private var statusListener: ((StreamStatus) -> Unit)? = null
+    private var statsListener: ((Int, Float, Long) -> Unit)? = null
+
+    // ── Service lifecycle ─────────────────────────────────────────────────────
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, buildNotification("Waiting for stream…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification("Waiting for stream…"))
+        }
+        Log.i(TAG, "Service created")
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startPipeline()
+        return START_STICKY  // Restart if killed by system
+    }
+
+    override fun onBind(intent: Intent): IBinder = binder
+
+    override fun onDestroy() {
+        Log.i(TAG, "Service destroying — stopping pipeline")
+        stopPipeline()
+        super.onDestroy()
+    }
+
+    // ── Public API (called from MainActivity via bound connection) ────────────
+
+    /** Called when the SurfaceView's Surface is created/destroyed. */
+    fun setSurface(surface: Surface?) {
+        Log.d(TAG, "setSurface: ${surface?.isValid}")
+        currentSurface = surface
+        streamDecoder?.updateSurface(surface)
+    }
+
+    /** Register a callback to receive StreamStatus updates on the calling thread. */
+    fun setStatusListener(listener: (StreamStatus) -> Unit) {
+        statusListener = listener
+    }
+
+    /** Register a callback to receive performance stats (fps, mbps, latencyMs). */
+    fun setStatsListener(listener: (Int, Float, Long) -> Unit) {
+        statsListener = listener
+    }
+
+    // ── Pipeline control ──────────────────────────────────────────────────────
+
+    private fun startPipeline() {
+        stopPipeline()
+
+        Log.i(TAG, "Starting pipeline — port ${STREAM_PORT}")
+        emitStatus(StreamStatus.WAITING)
+
+        streamDecoder = StreamDecoder(
+            onFirstFrame = {
+                emitStatus(StreamStatus.STREAMING)
+                updateNotification("Streaming")
+            },
+            onError = { msg ->
+                Log.e(TAG, "Decoder error: $msg")
+                emitStatus(StreamStatus.ERROR(msg))
+                // Restart after a brief pause
+                android.os.Handler(mainLooper).postDelayed({ startPipeline() }, 2_000)
+            },
+            onStatsUpdate = { fps, mbps, latencyMs ->
+                statsListener?.invoke(fps, mbps, latencyMs)
+            }
+        )
+
+        socketReader = SocketReader(
+            port = STREAM_PORT,
+            onConnected = {
+                Log.i(TAG, "Host connected")
+                emitStatus(StreamStatus.CONNECTING)
+                updateNotification("Connected — starting decode…")
+                // Configure and start the decoder once we know a stream is incoming
+                streamDecoder?.start(currentSurface)
+            },
+            onData = { buf, offset, length ->
+                streamDecoder?.feedData(buf, offset, length)
+            },
+            onDisconnected = {
+                Log.i(TAG, "Host disconnected — waiting for reconnect")
+                streamDecoder?.stop()
+                emitStatus(StreamStatus.WAITING)
+                updateNotification("Waiting for stream…")
+                // SocketReader auto-loops back to accept() — no restart needed here
+            },
+            onError = { msg ->
+                Log.e(TAG, "Socket error: $msg")
+                emitStatus(StreamStatus.ERROR(msg))
+            }
+        )
+
+        socketReader?.start()
+    }
+
+    private fun stopPipeline() {
+        socketReader?.stop()
+        socketReader = null
+        streamDecoder?.stop()
+        streamDecoder = null
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private fun emitStatus(status: StreamStatus) {
+        statusListener?.invoke(status)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "NativeSunshine Stream",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "USB display stream receiver"
+                setShowBadge(false)
+            }
+            getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(channel)
+        }
+    }
+
+    private fun buildNotification(text: String): Notification {
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("NativeSunshine")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
+    }
+
+    private fun updateNotification(text: String) {
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification(text))
+    }
+
+    companion object {
+        /** Must match ADB_STREAM_PORT in config.sh */
+        const val STREAM_PORT = 7878
+    }
+}

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- The video surface fills the entire screen.
+         SurfaceView renders below other views, so the status overlay sits on top. -->
+    <SurfaceView
+        android:id="@+id/surface_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Status overlay shown when waiting/connecting/error -->
+    <!-- Performance stats overlay -->
+    <TextView
+        android:id="@+id/stats_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_margin="16dp"
+        android:background="#AA000000"
+        android:padding="8dp"
+        android:textColor="#00FF00"
+        android:fontFamily="monospace"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        android:text="FPS: -- | -- Mbps | Latency: -- ms" />
+
+    <LinearLayout
+        android:id="@+id/status_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="24dp">
+
+        <TextView
+            android:id="@+id/status_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:fontFamily="monospace"
+            android:gravity="center"
+            android:text="@string/status_waiting"
+            android:background="#AA000000"
+            android:padding="16dp" />
+
+    </LinearLayout>
+
+</FrameLayout>
