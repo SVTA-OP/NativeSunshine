@@ -13,6 +13,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
@@ -31,6 +32,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private lateinit var statusText: TextView
     private lateinit var statsText: TextView
+    private lateinit var settingsButton: ImageView
     private var receiverService: ReceiverService? = null
     private var isBound = false
 
@@ -76,8 +78,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         surfaceView = findViewById(R.id.surface_view)
         statusText  = findViewById(R.id.status_text)
         statsText   = findViewById(R.id.stats_text)
+        settingsButton = findViewById(R.id.settings_button)
 
         surfaceView.holder.addCallback(this)
+
+        settingsButton.setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
 
         // Go fully immersive
         hideSystemUI()
@@ -127,6 +134,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             StreamStatus.WAITING -> {
                 statusText.visibility = View.VISIBLE
                 statusText.text = getString(R.string.status_waiting)
+                settingsButton.visibility = View.VISIBLE
                 statsText.visibility = View.GONE
             }
             StreamStatus.CONNECTING -> {
@@ -137,11 +145,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             StreamStatus.STREAMING -> {
                 // Hide status text, show performance overlay
                 statusText.visibility = View.GONE
+                settingsButton.visibility = View.GONE
                 statsText.visibility = View.VISIBLE
             }
             is StreamStatus.ERROR -> {
                 statusText.visibility = View.VISIBLE
                 statusText.text = getString(R.string.status_error, status.message)
+                settingsButton.visibility = View.VISIBLE
                 statsText.visibility = View.GONE
             }
         }

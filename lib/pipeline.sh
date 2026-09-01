@@ -51,9 +51,9 @@ pipewiresrc
   !
   videoconvert
   !
-  video/x-raw, format=NV12
+  video/x-raw, width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, max-framerate=${TARGET_REFRESH}/1, format=NV12
   !
-  queue max-size-buffers=60
+  queue max-size-buffers=5
   !
   vulkanupload
   !
@@ -95,7 +95,9 @@ pipewiresrc
   !
   videoconvert
   !
-  queue max-size-buffers=60
+  video/x-raw, width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, max-framerate=${TARGET_REFRESH}/1
+  !
+  queue max-size-buffers=5
   !
   nvh264enc
     bitrate=${bitrate}
@@ -137,9 +139,9 @@ pipewiresrc
   !
   videoconvert
   !
-  video/x-raw, format=I420
+  video/x-raw, width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, max-framerate=${TARGET_REFRESH}/1, format=I420
   !
-  queue max-size-buffers=60
+  queue max-size-buffers=5
   !
   x264enc
     bitrate=${bitrate}
@@ -149,6 +151,47 @@ pipewiresrc
     pass=cbr
     aud=false
     threads=4
+  !
+  video/x-h264,
+    stream-format=byte-stream,
+    alignment=au,
+    profile=main
+  !
+  h264parse
+    config-interval=-1
+  !
+  tcpclientsink
+    host=127.0.0.1
+    port=${port}
+    sync=false
+EOF
+}
+
+# -----------------------------------------------------------------------------
+# _build_vaapi_pipeline — Intel/AMD VAAPI H.264 encoder pipeline
+# -----------------------------------------------------------------------------
+_build_vaapi_pipeline() {
+    local node_id="$1"
+    local port="$2"
+    local bitrate="${STREAM_BITRATE:-8000}"
+    local keyint="${KEYFRAME_INTERVAL:-60}"
+
+    cat <<EOF
+pipewiresrc
+    path=${node_id}
+    do-timestamp=true
+  !
+  video/x-raw, width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, max-framerate=${TARGET_REFRESH}/1
+  !
+  vaapipostproc
+  !
+  queue max-size-buffers=5
+  !
+  vaapih264enc
+    bitrate=${bitrate}
+    keyframe-period=${keyint}
+    rate-control=cbr
+    tune=low-power
   !
   video/x-h264,
     stream-format=byte-stream,

@@ -82,9 +82,8 @@ wait_for_adb_device() {
 check_adb_usb() {
     if [[ "${ADB_SERIAL}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
         log_warn "ADB device serial '${ADB_SERIAL}' looks like a TCP/IP connection."
-        log_warn "NativeSunshine requires a physical USB connection, not ADB-over-TCP."
-        log_warn "Disconnect the TCP device and reconnect via USB cable, then re-run."
-        return 1
+        log_warn "NativeSunshine was designed for USB-C, so using Wireless Debugging (Wi-Fi) may have higher latency."
+        return 0
     fi
     log_info "ADB device is connected via USB ✓"
     return 0
@@ -108,6 +107,83 @@ get_device_info() {
     fi
 
     return 0
+}
+
+# -----------------------------------------------------------------------------
+# get_client_display_metrics — query device for native resolution and refresh rate
+# -----------------------------------------------------------------------------
+get_client_display_metrics() {
+    log_step "Fetching device display metrics"
+    local serial="${ADB_SERIAL}"
+    
+    # Get Physical Size
+    local wm_size
+    wm_size=$("${ADB_BIN:-adb}" -s "$serial" shell wm size 2>/dev/null | grep "Physical size:" | awk '{print $3}')
+    if [[ -n "$wm_size" && "$wm_size" == *"x"* ]]; then
+        local w="${wm_size%x*}"
+        local h="${wm_size#*x}"
+        
+        # Get Orientation
+        local orientation
+        orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys input 2>/dev/null | grep SurfaceOrientation | head -1 | awk '{print $2}')
+        
+        if [[ "$orientation" == "1" || "$orientation" == "3" ]]; then
+            export TARGET_WIDTH="$h"
+            export TARGET_HEIGHT="$w"
+        else
+            export TARGET_WIDTH="$w"
+            export TARGET_HEIGHT="$h"
+        fi
+        
+        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation:-0})"
+    else
+        log_warn "Could not fetch device resolution, falling back to ${TARGET_WIDTH}x${TARGET_HEIGHT}"
+    fi
+
+    # Get Refresh Rate
+    local refresh_rate
+    
+    if [[ -n "${GUI_FRAMERATE:-}" ]] && [[ "${GUI_FRAMERATE}" -gt 0 ]]; then
+        TARGET_REFRESH="${GUI_FRAMERATE}"
+        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, forced ${TARGET_REFRESH}Hz)"
+    else
+        refresh_rate=$("${ADB_BIN:-adb}" -s "$ADB_SERIAL" shell dumpsys display | grep -iE 'refresh|fps' | grep -oE '[0-9]+\.[0-9]+' | head -n 1)
+
+        if [[ -n "$refresh_rate" ]]; then
+            # Round to integer
+            TARGET_REFRESH=$(printf "%.0f" "$refresh_rate")
+            log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${TARGET_REFRESH}Hz)"
+        else
+            log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation})"
+            log_warn "Could not fetch device refresh rate, falling back to 120Hz"
+            TARGET_REFRESH=120
+        fi
+    fi
+    
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# watch_client_orientation — background loop to poll orientation
+# -----------------------------------------------------------------------------
+watch_client_orientation() {
+    local serial="${ADB_SERIAL}"
+    local main_pid="$1"
+    
+    # Get initial orientation
+    local current_orientation
+    current_orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys input 2>/dev/null | grep SurfaceOrientation | head -1 | awk '{print $2}')
+    
+    while true; do
+        sleep 2
+        local new_orientation
+        new_orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys input 2>/dev/null | grep SurfaceOrientation | head -1 | awk '{print $2}')
+        if [[ -n "$new_orientation" && "$new_orientation" != "$current_orientation" ]]; then
+            log_info "Orientation changed ($current_orientation -> $new_orientation). Restarting pipeline..."
+            kill -SIGUSR1 "$main_pid"
+            exit 0
+        fi
+    done
 }
 
 # -----------------------------------------------------------------------------
@@ -137,6 +213,10 @@ setup_adb_forward() {
         log_warn "Forward may not have been applied. Current forwards:"
         log_warn "$fwd_check"
     fi
+    
+    local control_port="7879"
+    log_step "Setting up ADB reverse forward: device:${control_port} → localhost:${control_port}"
+    "${ADB_BIN:-adb}" -s "${ADB_SERIAL}" reverse "tcp:${control_port}" "tcp:${control_port}" 2>/dev/null || true
 
     return 0
 }
@@ -151,8 +231,10 @@ teardown_adb_forward() {
     if [[ -z "${ADB_SERIAL}" ]]; then
         # No serial means we can't target a specific device; remove all
         "${ADB_BIN:-adb}" forward --remove-all 2>/dev/null || true
+        "${ADB_BIN:-adb}" reverse --remove-all 2>/dev/null || true
     else
         "${ADB_BIN:-adb}" -s "${ADB_SERIAL}" forward --remove-all 2>/dev/null || true
+        "${ADB_BIN:-adb}" -s "${ADB_SERIAL}" reverse --remove-all 2>/dev/null || true
     fi
 
     log_success "ADB port forwards cleared."

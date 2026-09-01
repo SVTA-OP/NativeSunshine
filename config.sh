@@ -6,12 +6,11 @@
 
 # -----------------------------------------------------------------------------
 # Virtual Display
-# Must match the --virtual-monitor argument in your GNOME Shell systemd override:
-# ~/.config/systemd/user/org.gnome.Shell@user.service.d/persistent-virtual-monitor.conf
+# Target resolution and refresh rate for the virtual monitor.
 # -----------------------------------------------------------------------------
 TARGET_WIDTH=800
 TARGET_HEIGHT=1340
-TARGET_REFRESH=60
+TARGET_REFRESH=120
 
 # -----------------------------------------------------------------------------
 # Encoding
@@ -22,17 +21,22 @@ TARGET_REFRESH=60
 # software: CPU-only libx264 (fallback, high CPU usage)
 # -----------------------------------------------------------------------------
 ENCODER=vulkan
+STREAM_BITRATE=8000
+KEYFRAME_INTERVAL=60
+PLACEMENT="right"
+
+# Try to load overrides from the GUI config
+GUI_CONFIG="${HOME}/.config/native-sunshine/config.json"
+if [[ -f "$GUI_CONFIG" ]]; then
+    ENCODER=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('encoder', 'vulkan'))" "$GUI_CONFIG")
+    STREAM_BITRATE=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('bitrate', 8000))" "$GUI_CONFIG")
+    GUI_FRAMERATE=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('framerate', 0))" "$GUI_CONFIG")
+    KEYFRAME_INTERVAL=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('keyframe_interval', 60))" "$GUI_CONFIG")
+    PLACEMENT=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('placement', 'right'))" "$GUI_CONFIG")
+fi
 
 # VAAPI render node — check with: ls /dev/dri/renderD*
 VAAPI_DEVICE=/dev/dri/renderD128
-
-# H.264 bitrate in kbps. 8000 = 8 Mbps (well within USB ADB throughput).
-# Increase for higher quality; decrease if ADB throughput is saturated.
-STREAM_BITRATE=8000
-
-# H.264 keyframe interval in frames (1 second at 60fps = 60 frames).
-# Lower = faster seek/recovery, slightly higher bandwidth.
-KEYFRAME_INTERVAL=60
 
 # -----------------------------------------------------------------------------
 # ADB / Transport
@@ -55,3 +59,4 @@ PIPELINE_LOG="${LOG_DIR}/native-sunshine-pipeline.log"
 
 # Optional: explicit path to gst-launch-1.0 binary
 GST_LAUNCH_BIN=gst-launch-1.0
+TARGET_DISPLAY=virtual

@@ -45,38 +45,6 @@ adb forward tcp:7878 ──USB-C──►  ServerSocket:7878
 
 ---
 
-## Virtual Display Setup
-
-Your GNOME Shell must start with a virtual monitor. This is already configured via a systemd override that runs at login.
-
-**To verify your current setup:**
-```bash
-cat ~/.config/systemd/user/org.gnome.Shell@user.service.d/persistent-virtual-monitor.conf
-```
-
-**To create it (if not present):**
-```bash
-mkdir -p ~/.config/systemd/user/org.gnome.Shell@user.service.d/
-cat > ~/.config/systemd/user/org.gnome.Shell@user.service.d/persistent-virtual-monitor.conf << 'EOF'
-[Service]
-ExecStart=
-ExecStart=/usr/bin/gnome-shell --mode=user --virtual-monitor 800x1340
-EOF
-systemctl --user daemon-reload
-# Then log out and back in
-```
-
-**To verify it's live:**
-```bash
-gdbus call --session \
-  --dest org.gnome.Mutter.DisplayConfig \
-  --object-path /org/gnome/Mutter/DisplayConfig \
-  --method org.gnome.Mutter.DisplayConfig.GetCurrentState \
-  2>/dev/null | grep -o "Virtual-[0-9]*"
-```
-
----
-
 ## Quick Start
 
 ### 1. Check dependencies
@@ -104,28 +72,27 @@ Or use the installer:
 1. Connect your Android device via USB-C
 2. Accept the USB Debugging RSA fingerprint on your device
 3. Open **NativeSunshine** on your Android device
-4. Run the orchestrator:
+4. Launch the NativeSunshine GUI:
    ```bash
-   ./native-sunshine.sh
+   ./native-sunshine-gui.py
    ```
-5. In GNOME display settings, move windows to the **Virtual-1** display
+5. In the GUI, configure your Encoder, Bitrate, and where you want the virtual monitor placed (Left, Right, Above, Below).
+6. Click **Launch Stream**. 
+7. The virtual monitor will be dynamically created using the exact native resolution and refresh rate of your connected Android device.
 
 ### 4. Stop
-Press `Ctrl+C` — the orchestrator cleans up the ADB tunnel and exits.
+Click **Stop Stream** in the GUI, or close the window. All virtual monitors will be automatically and cleanly destroyed.
 
 ---
 
 ## Configuration
 
-Edit [`config.sh`](config.sh) to adjust settings:
+Settings are easily managed through the GTK4 GUI (`./native-sunshine-gui.py`) which saves to `~/.config/native-sunshine/config.json`.
+
+Alternatively, advanced users can edit [`config.sh`](config.sh) to adjust low-level paths or ADB ports:
 
 | Variable | Default | Description |
 |---|---|---|
-| `TARGET_WIDTH` | `800` | Virtual display width (must match `--virtual-monitor`) |
-| `TARGET_HEIGHT` | `1340` | Virtual display height |
-| `TARGET_REFRESH` | `60` | Frame rate |
-| `ENCODER` | `vaapi` | Hardware encoder: `vaapi` / `nvenc` / `software` |
-| `STREAM_BITRATE` | `8000` | H.264 bitrate in kbps |
 | `ADB_STREAM_PORT` | `7878` | TCP port for ADB tunnel (must match APK's `STREAM_PORT`) |
 
 > **Important**: If you change `ADB_STREAM_PORT` in `config.sh`, update `STREAM_PORT` in [`ReceiverService.kt`](android/NativeSunshine/app/src/main/java/dev/nativesunshine/ReceiverService.kt) and rebuild the APK.
@@ -134,8 +101,8 @@ Edit [`config.sh`](config.sh) to adjust settings:
 
 ## Troubleshooting
 
-### `No virtual display found in Mutter's display list`
-The `--virtual-monitor` flag is not active in your current GNOME session. Log out and back in after setting the systemd override.
+### Cannot find PipeWire node ID for virtual monitor
+If you encounter this error, ensure your GNOME session supports DBus Screencasting.
 
 ### `Pipeline exited immediately`
 Check the pipeline log:

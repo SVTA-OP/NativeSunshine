@@ -94,6 +94,8 @@ log_info "NativeSunshine starting (encoder=${ENCODER}, ${TARGET_WIDTH}x${TARGET_
 # Teardown function — called by signal traps in utils.sh
 # -----------------------------------------------------------------------------
 teardown() {
+    set +e
+    trap '' SIGPIPE
     echo ""  # Newline after ^C
     log_step "Teardown"
 
@@ -104,6 +106,18 @@ teardown() {
     if [[ -n "${MUTTER_SCREENCAST_PID:-}" ]]; then
         kill "$MUTTER_SCREENCAST_PID" 2>/dev/null || true
     fi
+    pkill -f "mutter_create_virtual.py" 2>/dev/null || true
+    
+    # Kill control server
+    if [[ -n "${CONTROL_SERVER_PID:-}" ]]; then
+        kill "$CONTROL_SERVER_PID" 2>/dev/null || true
+    fi
+    pkill -f "lib/control_server.py" 2>/dev/null || true
+
+    # Kill orientation watcher
+    if [[ -n "${ORIENTATION_WATCHER_PID:-}" ]]; then
+        kill "$ORIENTATION_WATCHER_PID" 2>/dev/null || true
+    fi
 
     # 3. Remove ADB port forwards
     teardown_adb_forward
@@ -113,6 +127,22 @@ teardown() {
 
 # Register signal traps (defined in lib/utils.sh, calls teardown above)
 setup_traps
+
+restart_pipeline() {
+    log_info "Settings updated via control channel. Restarting..."
+    stop_pipeline "${PIPELINE_PID:-}"
+    if [[ -n "${MUTTER_SCREENCAST_PID:-}" ]]; then
+        kill "$MUTTER_SCREENCAST_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${CONTROL_SERVER_PID:-}" ]]; then
+        kill "$CONTROL_SERVER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${ORIENTATION_WATCHER_PID:-}" ]]; then
+        kill "$ORIENTATION_WATCHER_PID" 2>/dev/null || true
+    fi
+    exec "$0" "$@"
+}
+trap restart_pipeline SIGUSR1
 
 # -----------------------------------------------------------------------------
 # --check mode: dependency validation only
@@ -171,6 +201,7 @@ log_step "Step 1/5 — ADB device"
 wait_for_adb_device || exit 1
 check_adb_usb       || exit 1
 get_device_info     || exit 1
+get_client_display_metrics || exit 1
 
 # Non-fatal: warn if app not installed but continue so user can install + retry
 check_app_installed || log_warn "Continuing without APK — install it before opening the app."
@@ -192,6 +223,13 @@ verify_virtual_display || exit 1
 # -----------------------------------------------------------------------------
 log_step "Step 4/5 — PipeWire node"
 get_pipewire_node_id || exit 1
+
+# Apply configured display placement
+if [[ -n "${PLACEMENT:-}" ]]; then
+    log_info "Applying virtual monitor placement: ${PLACEMENT}"
+    python3 "${SCRIPT_DIR}/lib/placement_manager.py" "${PLACEMENT}" || log_warn "Failed to apply display placement"
+fi
+
 display_info
 
 # -----------------------------------------------------------------------------
@@ -208,6 +246,15 @@ launch_pipeline "${PIPELINE_STR}" || exit 1
 
 # Print connection summary for the user
 print_stream_info
+
+# Start control server
+pkill -f "lib/control_server.py" 2>/dev/null || true
+python3 "${SCRIPT_DIR}/lib/control_server.py" $$ &
+CONTROL_SERVER_PID=$!
+
+# Start orientation watcher
+watch_client_orientation $$ &
+ORIENTATION_WATCHER_PID=$!
 
 # -----------------------------------------------------------------------------
 # Wait — keep running until the pipeline exits or we get a signal

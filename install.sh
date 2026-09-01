@@ -107,7 +107,7 @@ gst_pkgs_pacman=(
     gst-plugins-bad
     gst-plugins-ugly
     gst-plugin-pipewire
-    gstreamer-vaapi
+    gst-plugin-va
 )
 gst_pkgs_dnf=(
     gstreamer1
@@ -144,12 +144,12 @@ done
 step "GStreamer elements"
 gst_elements=(
     "pipewiresrc:PipeWire video source"
-    "vaapih264enc:VAAPI H.264 encoder (AMD/Intel)"
+    "vulkanh264enc:Vulkan H.264 encoder (AMD/NVIDIA)"
     "h264parse:H.264 bitstream parser"
     "tcpclientsink:TCP stream output"
     "queue:Stream queue"
     "videoconvert:Video format converter"
-    "vaapipostproc:VAAPI post-processor"
+    "vulkanupload:Vulkan uploader"
 )
 
 MISSING_GST=false
@@ -234,7 +234,6 @@ warn "Settings → About Phone → tap Build Number ×7 → Developer Options �
 
 # ── Section 5: Virtual display check ─────────────────────────────────────────
 step "GNOME virtual display"
-SYSTEMD_OVERRIDE="${HOME}/.config/systemd/user/org.gnome.Shell@user.service.d/persistent-virtual-monitor.conf"
 if [[ -f "${SYSTEMD_OVERRIDE}" ]]; then
     ok "systemd override found: ${SYSTEMD_OVERRIDE}"
     echo "  Contents:"

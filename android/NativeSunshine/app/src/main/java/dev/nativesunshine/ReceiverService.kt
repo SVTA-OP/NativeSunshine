@@ -94,10 +94,36 @@ class ReceiverService : Service() {
 
     // ── Pipeline control ──────────────────────────────────────────────────────
 
+    private fun getStreamPort(): Int {
+        val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+        return prefs.getString("stream_port", "7878")?.toIntOrNull() ?: 7878
+    }
+
+    private fun sendControlMessage() {
+        Thread {
+            try {
+                val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+                val fps = prefs.getString("host_fps", "60")?.toIntOrNull() ?: 60
+                val bitrate = prefs.getString("host_bitrate", "8000")?.toIntOrNull() ?: 8000
+                
+                val json = """{"fps":$fps,"bitrate":$bitrate}"""
+                val socket = java.net.Socket("127.0.0.1", 7879)
+                socket.outputStream.write(json.toByteArray())
+                socket.close()
+                Log.i(TAG, "Sent control message to host")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send control message: ${e.message}")
+            }
+        }.start()
+    }
+
     private fun startPipeline() {
         stopPipeline()
 
-        Log.i(TAG, "Starting pipeline — port ${STREAM_PORT}")
+        sendControlMessage()
+        val streamPort = getStreamPort()
+
+        Log.i(TAG, "Starting pipeline — port ${streamPort}")
         emitStatus(StreamStatus.WAITING)
 
         streamDecoder = StreamDecoder(
@@ -117,7 +143,7 @@ class ReceiverService : Service() {
         )
 
         socketReader = SocketReader(
-            port = STREAM_PORT,
+            port = streamPort,
             onConnected = {
                 Log.i(TAG, "Host connected")
                 emitStatus(StreamStatus.CONNECTING)
@@ -193,8 +219,4 @@ class ReceiverService : Service() {
             .notify(NOTIFICATION_ID, buildNotification(text))
     }
 
-    companion object {
-        /** Must match ADB_STREAM_PORT in config.sh */
-        const val STREAM_PORT = 7878
-    }
 }

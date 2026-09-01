@@ -161,6 +161,11 @@ class StreamDecoder(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             }
+            
+            // Hint for high performance mode
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+            }
 
             // Generous input buffer for large SPS/PPS + IDR NAL units
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1 * 1024 * 1024)

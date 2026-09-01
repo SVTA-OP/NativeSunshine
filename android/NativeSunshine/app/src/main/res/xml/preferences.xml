@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+    <PreferenceCategory app:title="Stream Settings">
+        <EditTextPreference
+            app:key="stream_port"
+            app:title="Stream Port"
+            app:summary="Port to receive stream on (Default: 7878)"
+            app:defaultValue="7878"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+    <PreferenceCategory app:title="Host Settings (Control)">
+        <EditTextPreference
+            app:key="host_fps"
+            app:title="Target FPS"
+            app:summary="FPS for host pipeline (Default: 60)"
+            app:defaultValue="60"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="host_bitrate"
+            app:title="Stream Bitrate (kbps)"
+            app:summary="Bitrate for host encoder (Default: 8000)"
+            app:defaultValue="8000"
+            app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+</PreferenceScreen>

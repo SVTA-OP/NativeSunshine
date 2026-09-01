@@ -47,4 +47,5 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.androidx.lifecycle.service)
+    implementation(libs.androidx.preference.ktx)
 }

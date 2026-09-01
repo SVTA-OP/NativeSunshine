@@ -38,6 +38,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SettingsActivity"
+            android:label="Settings"
+            android:theme="@style/Theme.NativeSunshine" />
+
         <service
             android:name=".ReceiverService"
             android:exported="false"
