@@ -107,7 +107,7 @@ gst_pkgs_pacman=(
     gst-plugins-bad
     gst-plugins-ugly
     gst-plugin-pipewire
-    gst-plugin-va
+    gstreamer-vaapi
 )
 gst_pkgs_dnf=(
     gstreamer1
@@ -150,6 +150,7 @@ gst_elements=(
     "queue:Stream queue"
     "videoconvert:Video format converter"
     "vulkanupload:Vulkan uploader"
+    "vaapih264enc:VAAPI H.264 encoder"
 )
 
 MISSING_GST=false
