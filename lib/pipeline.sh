@@ -61,7 +61,6 @@ pipewiresrc
     rate-control=cbr
     bitrate=${bitrate}
     idr-period=${keyint}
-    quality=1
   !
   video/x-h264,
     stream-format=byte-stream,
