@@ -152,13 +152,10 @@ get_client_display_metrics() {
         TARGET_REFRESH="${GUI_FRAMERATE}"
         log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${refresh_rate:-Unknown}Hz)"
         log_info "Using manual refresh rate: ${TARGET_REFRESH}Hz"
-    elif [[ -n "$refresh_rate" ]]; then
-        TARGET_REFRESH=$(printf "%.0f" "$refresh_rate")
-        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${TARGET_REFRESH}Hz)"
     else
-        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation})"
-        log_warn "Could not fetch device refresh rate, falling back to 120Hz"
-        TARGET_REFRESH=120
+        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${TARGET_REFRESH}Hz)"
+        # TARGET_REFRESH=$(printf "%.0f" "$refresh_rate")
+        # TARGET_REFRESH=120
     fi
     
     return 0
