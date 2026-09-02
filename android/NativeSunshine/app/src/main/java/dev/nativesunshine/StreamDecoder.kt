@@ -40,6 +40,7 @@ private val START_CODE_3 = byteArrayOf(0x00, 0x00, 0x01)
  * @param onStatsUpdate Callback fired every second with (fps, mbps, latencyMs)
  */
 class StreamDecoder(
+    private val refreshRate: Float = 60f,
     private val onFirstFrame: () -> Unit,
     private val onError: (message: String) -> Unit,
     private val onStatsUpdate: ((Int, Float, Long) -> Unit)? = null
@@ -58,11 +59,11 @@ class StreamDecoder(
     // assuming a specific capture fps. This is independent of the reactive
     // backpressure drop below, which remains purely a safety valve for input
     // buffer starvation, not a smoothing mechanism.
-    private val renderIntervalNs = 1_000_000_000L / 60
+    private val renderIntervalNs = (1_000_000_000L / refreshRate).toLong()
     private var lastRenderNs = 0L
 
     // Queue of byte arrays from SocketReader → queueThread → MediaCodec
-    private val dataQueue = LinkedBlockingQueue<ByteArray>(2048)
+    private val dataQueue = LinkedBlockingQueue<ByteArray>(256)
 
     // Performance tracking
     private var framesRendered = 0
@@ -119,66 +120,76 @@ class StreamDecoder(
         System.arraycopy(buf, offset, frameBuf, frameBufLen, length)
         frameBufLen += length
         
+        var lastStartIdx = -1
+        var lastAdvance = 0
         var searchIdx = 0
         while (searchIdx <= frameBufLen - 3) {
-            // Find Annex B start codes (00 00 01)
             if (frameBuf[searchIdx] == 0.toByte() && frameBuf[searchIdx+1] == 0.toByte() && frameBuf[searchIdx+2] == 1.toByte()) {
-                
-                var actualStart = searchIdx
-                var advance = 3
-                // Check if it's a 4-byte start code (00 00 00 01)
+                lastStartIdx = searchIdx
+                lastAdvance = 3
                 if (searchIdx > 0 && frameBuf[searchIdx - 1] == 0.toByte()) {
-                    actualStart = searchIdx - 1
-                    advance = 4
+                    lastStartIdx = searchIdx - 1
+                    lastAdvance = 4
+                }
+            }
+            searchIdx++
+        }
+        
+        if (lastStartIdx > 0) {
+            // Extract all NAL units up to the last start code as a single chunk
+            val frame = frameBuf.copyOfRange(0, lastStartIdx)
+
+            if (!codecConfigured) {
+                // Scan the chunk to find the SPS start code
+                var spsStart = -1
+                var i = 0
+                while (i <= frame.size - 4) {
+                    if (frame[i] == 0.toByte() && frame[i+1] == 0.toByte() && frame[i+2] == 1.toByte()) {
+                        val nalType = frame[i+3].toInt() and 0x1F
+                        if (nalType == 7) {
+                            spsStart = if (i > 0 && frame[i-1] == 0.toByte()) i - 1 else i
+                            break
+                        }
+                    }
+                    i++
                 }
                 
-                if (actualStart > 0) {
-                    // Extract the complete NAL unit
-                    val frame = frameBuf.copyOfRange(0, actualStart)
-
-                    if (!codecConfigured) {
-                        val sclen = getStartCodeLen(frame, 0, frame.size)
-                        if (sclen > 0 && sclen < frame.size && (frame[sclen].toInt() and 0x1F) == 7) {
-                            val dims = parseSpsDimensions(frame, sclen)
-                            val surface = pendingSurface
-                            if (dims != null && surface != null) {
-                                try {
-                                    setupCodec(surface, dims.first, dims.second)
-                                    codecConfigured = true
-                                    startQueueThread()
-                                    Log.i(TAG, "Decoder started")
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Codec setup failed: ${e.message}", e)
-                                    isRunning.set(false)
-                                    onError("Codec setup failed: ${e.message}")
-                                    return
-                                }
-                            } else {
-                                Log.w(TAG, "Could not parse SPS dimensions — waiting for next SPS")
+                if (spsStart >= 0) {
+                    val sclen = getStartCodeLen(frame, spsStart, frame.size)
+                    if (sclen > 0) {
+                        val dims = parseSpsDimensions(frame, spsStart + sclen)
+                        val surface = pendingSurface
+                        if (dims != null && surface != null) {
+                            try {
+                                setupCodec(surface, dims.first, dims.second)
+                                codecConfigured = true
+                                startQueueThread()
+                                Log.i(TAG, "Decoder started")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Codec setup failed: ${e.message}", e)
+                                isRunning.set(false)
+                                onError("Codec setup failed: ${e.message}")
+                                return
                             }
+                        } else {
+                            Log.w(TAG, "Could not parse SPS dimensions — waiting for next SPS")
                         }
                     }
-
-                    if (codecConfigured) {
-                        try {
-                            dataQueue.put(frame) // Blocks applying backpressure
-                        } catch (e: InterruptedException) {
-                            return
-                        }
-                    }
-                    
-                    // Shift the remaining data (including the start code) to the beginning
-                    val remaining = frameBufLen - actualStart
-                    System.arraycopy(frameBuf, actualStart, frameBuf, 0, remaining)
-                    frameBufLen = remaining
-                    searchIdx = advance
-                } else {
-                    // Start code is at the very beginning, skip past it to find the next one
-                    searchIdx += advance
                 }
-            } else {
-                searchIdx++
             }
+
+            if (codecConfigured) {
+                try {
+                    dataQueue.put(frame) // Blocks applying backpressure
+                } catch (e: InterruptedException) {
+                    return
+                }
+            }
+            
+            // Shift the remaining data (including the last start code) to the beginning
+            val remaining = frameBufLen - lastStartIdx
+            System.arraycopy(frameBuf, lastStartIdx, frameBuf, 0, remaining)
+            frameBufLen = remaining
         }
         
         bytesReceived += length
@@ -341,16 +352,30 @@ class StreamDecoder(
             streamHeight
         ).apply {
             // Real-time priority — reduces decode latency
-            // NOTE: do NOT set KEY_LOW_LATENCY or KEY_OPERATING_RATE here.
-            // The MediaTek c2.mtk.avc.decoder crashes immediately (C2_CORRUPTED,
-            // err 0xe) if those hints are present in the format at configure time.
             setInteger(MediaFormat.KEY_PRIORITY, 0)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val info = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    val name = info.name
+                    info.release()
+                    val codecInfo = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { it.name == name }
+                    val caps = codecInfo?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    if (caps != null && caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)) {
+                        setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                        setInteger(MediaFormat.KEY_OPERATING_RATE, 120) // Give headroom without overwhelming Mediatek decoders
+                        Log.i(TAG, "Low latency mode enabled natively")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to check low latency support: ${e.message}")
+                }
+            }
 
             // Input buffer: large enough for SPS/PPS + IDR NAL units
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
 
-            // Frame rate hint for the decoder (matches encoder config)
-            setInteger(MediaFormat.KEY_FRAME_RATE, 60)
+            // Frame rate hint for the decoder
+            setInteger(MediaFormat.KEY_FRAME_RATE, refreshRate.toInt())
 
             // COLOR_FormatSurface = decode directly to Surface (zero-copy)
             setInteger(MediaFormat.KEY_COLOR_FORMAT,
@@ -420,23 +445,24 @@ class StreamDecoder(
 
                 // Determine if this NAL unit is SPS (7) or PPS (8)
                 var flags = 0
-                val startCodeLen = getStartCodeLen(chunk, 0, chunk.size)
-                if (startCodeLen > 0 && startCodeLen < chunk.size) {
-                    val nalType = chunk[startCodeLen].toInt() and 0x1F
-                    if (nalType == 7 || nalType == 8) {
-                        flags = MediaCodec.BUFFER_FLAG_CODEC_CONFIG
+                var i = 0
+                while (i <= chunk.size - 4) {
+                    if (chunk[i] == 0.toByte() && chunk[i+1] == 0.toByte() && chunk[i+2] == 1.toByte()) {
+                        val nalType = chunk[i+3].toInt() and 0x1F
+                        if (nalType == 7 || nalType == 8) {
+                            flags = MediaCodec.BUFFER_FLAG_CODEC_CONFIG
+                            break
+                        }
                     }
+                    i++
                 }
 
                 var idx = -1
-                var retries = 0
                 while (isRunning.get()) {
-                    idx = c.dequeueInputBuffer(10_000L)
+                    idx = c.dequeueInputBuffer(1000L)
                     if (idx >= 0) break
                     // If input buffer is full, drain output to free up buffers.
-                    // If we retry, drop frames to relieve Surface backpressure.
-                    retries++
-                    drainOutput(c, forceDrop = (retries > 0))
+                    drainOutput(c, forceDrop = false)
                 }
 
                 if (idx >= 0) {
@@ -484,8 +510,10 @@ class StreamDecoder(
             when {
                 outIdx >= 0 -> {
                     val queuedTime = latencyMap.remove(bufferInfo.presentationTimeUs)
+                    var decodeLatencyNs = 0L
                     if (queuedTime != null) {
-                        totalLatencyNs += (System.nanoTime() - queuedTime)
+                        decodeLatencyNs = System.nanoTime() - queuedTime
+                        totalLatencyNs += decodeLatencyNs
                         latencyCount++
                     }
                     framesRendered++
@@ -495,15 +523,23 @@ class StreamDecoder(
                     // N:1) decimation when the source runs faster than the
                     // panel, instead of dropping only under buffer pressure.
                     val now = System.nanoTime()
-                    val duePaced = (now - lastRenderNs) >= renderIntervalNs
-                    val shouldRender = !forceDrop && duePaced
+                    val slackNs = 2_000_000L
+                    val duePaced = (now - lastRenderNs + slackNs) >= renderIntervalNs
+                    
+                    // Dynamic backpressure: if network queue is building up, or the decoder
+                    // or surface is too slow. Drop this frame's render to catch up!
+                    // A threshold of > 2 prevents micro-stutters from dropped frames on Mediatek chips
+                    val isCongested = dataQueue.size > 2
+                    val shouldRender = !forceDrop && duePaced && !isCongested
 
                     c.releaseOutputBuffer(outIdx, shouldRender)
+                    
+                    if (!firstFrameFired.getAndSet(true)) {
+                        onFirstFrame()
+                    }
+                    
                     if (shouldRender) {
                         lastRenderNs = now
-                        if (!firstFrameFired.getAndSet(true)) {
-                            onFirstFrame()
-                        }
                     }
                 }
                 outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {

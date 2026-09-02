@@ -312,6 +312,30 @@ else
     fi
 fi
 
+# ── Section 7: GUI Desktop Shortcut ──────────────────────────────────────────
+step "GUI Desktop Shortcut"
+DESKTOP_FILE="${SCRIPT_DIR}/native-sunshine-gui.desktop"
+if [[ -f "${DESKTOP_FILE}" ]]; then
+    if [[ "${CHECK_ONLY}" != "true" ]]; then
+        chmod +x "${SCRIPT_DIR}/native-sunshine-gui.py"
+        mkdir -p "${HOME}/.local/share/applications"
+        # Use desktop-file-install if available, otherwise fallback to cp
+        if command -v desktop-file-install &>/dev/null; then
+            desktop-file-install --dir="${HOME}/.local/share/applications" "${DESKTOP_FILE}"
+        else
+            cp "${DESKTOP_FILE}" "${HOME}/.local/share/applications/"
+        fi
+        if command -v update-desktop-database &>/dev/null; then
+            update-desktop-database "${HOME}/.local/share/applications"
+        fi
+        ok "Installed GUI desktop shortcut to ${HOME}/.local/share/applications"
+    else
+        ok "GUI desktop shortcut exists (run without --check to install)"
+    fi
+else
+    warn "GUI desktop shortcut not found at ${DESKTOP_FILE}"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${R}"

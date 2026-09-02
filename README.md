@@ -80,6 +80,8 @@ Or use the installer:
 6. Click **Launch Stream**. 
 7. The virtual monitor will be dynamically created using the exact native resolution and refresh rate of your connected Android device.
 
+*Tip: A desktop shortcut for NativeSunshine is automatically installed by `install.sh`, so you can launch it from your application menu in the future!*
+
 ### 4. Stop
 Click **Stop Stream** in the GUI, or close the window. All virtual monitors will be automatically and cleanly destroyed.
 
@@ -120,9 +122,12 @@ Common causes:
 - Confirm both use the same port (default: 7878)
 
 ### High latency / choppy video
-- Reduce `STREAM_BITRATE` in `config.sh` (try `4000`)
-- Ensure you are using a USB 3.0+ cable and port
-- Check VAAPI is actually using hardware: `vainfo | grep VAEntrypointEncSliceLP`
+- Lower the **Resolution Scale (%)** in the GUI to reduce decode latency on budget Android devices.
+- Increase the **Keyframe Interval** in the GUI to 240 or 300 to prevent micro-stutters.
+- Reduce `STREAM_BITRATE` in the GUI (try `4000` or `5000`).
+- Ensure you are using a USB 3.0+ cable and port.
+- Check VAAPI is actually using hardware: `vainfo | grep VAEntrypointEncSliceLP`.
+- **LineageOS/Custom ROMs**: If latency persists, go to Developer Options and turn ON **Disable HW Overlays** to bypass the hardware composer's buffer frame.
 
 ### `adb: device unauthorized`
 Accept the RSA fingerprint prompt on your Android device's screen.

@@ -45,10 +45,8 @@ _build_vulkan_pipeline() {
 
     local w="${TARGET_WIDTH:-800}"
     local h="${TARGET_HEIGHT:-1340}"
-    # Cap encoder framerate to 60. The A7 Lite's MT8768T hardware decoder is
-    # physically limited to ~60fps at 800x1340 (H.264 Level 4.0 bounds). Feeding
-    # it 120fps overloads the silicon and causes a hard freeze/panic.
-    local fps=60
+    # Cap encoder framerate based on benchmarked limits.
+    local fps="${CLIENT_FRAMERATE:-60}"
     # NOTE: encoding at the exact target resolution (no manual alignment).
     # H.264 always pads internally to 16px macroblocks and signals the true
     # display size via SPS frame-cropping, so the decoder should see 800x1340
@@ -79,7 +77,7 @@ pipewiresrc
   !
   video/x-raw, format=NV12, width=${w}, height=${h}, framerate=${fps}/1
   !
-  queue max-size-buffers=5
+  queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
   !
   vulkanupload
   !
@@ -123,9 +121,9 @@ pipewiresrc
   !
   videorate
   !
-  video/x-raw, width=${w}, height=${h}, framerate=60/1
+  video/x-raw, width=${w}, height=${h}, framerate=${CLIENT_FRAMERATE:-60}/1
   !
-  queue max-size-buffers=5
+  queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
   !
   nvh264enc
     bitrate=${bitrate}
@@ -170,9 +168,9 @@ pipewiresrc
   !
   videorate
   !
-  video/x-raw, format=I420, width=${w}, height=${h}, framerate=60/1
+  video/x-raw, format=I420, width=${w}, height=${h}, framerate=${CLIENT_FRAMERATE:-60}/1
   !
-  queue max-size-buffers=5
+  queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
   !
   x264enc
     bitrate=${bitrate}
@@ -215,9 +213,9 @@ pipewiresrc
   !
   videorate
   !
-  video/x-raw, width=${w}, height=${h}, framerate=60/1
+  video/x-raw, width=${w}, height=${h}, framerate=${CLIENT_FRAMERATE:-60}/1
   !
-  queue max-size-buffers=5
+  queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
   !
   vah264enc
     bitrate=${bitrate}
@@ -245,6 +243,17 @@ build_pipeline_string() {
     local node_id="$1"
     local port="$2"
     local encoder="${ENCODER:-vulkan}"
+    local scale="${RESOLUTION_SCALE:-100}"
+
+    if [ "$scale" -lt 100 ]; then
+        local orig_w="${TARGET_WIDTH:-800}"
+        local orig_h="${TARGET_HEIGHT:-1340}"
+        local new_w=$(( orig_w * scale / 100 ))
+        local new_h=$(( orig_h * scale / 100 ))
+        # Ensure dimensions are even (required by most video encoders)
+        export TARGET_WIDTH=$(( new_w + (new_w % 2) ))
+        export TARGET_HEIGHT=$(( new_h + (new_h % 2) ))
+    fi
 
     case "$encoder" in
         vulkan)    _build_vulkan_pipeline    "$node_id" "$port" ;;

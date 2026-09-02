@@ -23,8 +23,8 @@ class NativeSunshineApp(Adw.Application):
         default_config = {
             "encoder": "vulkan",
             "bitrate": 8000,
-            "framerate": 0,
             "keyframe_interval": 60,
+            "resolution_scale": 100,
             "placement": "right"
         }
         if os.path.exists(CONFIG_FILE):
@@ -86,14 +86,6 @@ class NativeSunshineApp(Adw.Application):
         bitrate_row.add_suffix(self.bitrate_spin)
         group_stream.add(bitrate_row)
 
-        # Framerate spin button
-        self.framerate_adj = Gtk.Adjustment(value=self.config.get("framerate", 0), lower=0, upper=240, step_increment=30)
-        self.framerate_spin = Gtk.SpinButton(adjustment=self.framerate_adj, numeric=True)
-        self.framerate_spin.set_valign(Gtk.Align.CENTER)
-        self.framerate_spin.connect("value-changed", self.on_framerate_changed)
-        framerate_row = Adw.ActionRow(title="Framerate (0 = Auto)")
-        framerate_row.add_suffix(self.framerate_spin)
-        group_stream.add(framerate_row)
 
         # Keyframe interval spin button
         self.keyframe_adj = Gtk.Adjustment(value=self.config.get("keyframe_interval", 60), lower=10, upper=300, step_increment=10)
@@ -103,6 +95,15 @@ class NativeSunshineApp(Adw.Application):
         keyframe_row = Adw.ActionRow(title="Keyframe Interval (frames)")
         keyframe_row.add_suffix(self.keyframe_spin)
         group_stream.add(keyframe_row)
+
+        # Resolution scale spin button / knob
+        self.scale_adj = Gtk.Adjustment(value=self.config.get("resolution_scale", 100), lower=10, upper=100, step_increment=5)
+        self.scale_spin = Gtk.SpinButton(adjustment=self.scale_adj, numeric=True)
+        self.scale_spin.set_valign(Gtk.Align.CENTER)
+        self.scale_spin.connect("value-changed", self.on_scale_changed)
+        scale_row = Adw.ActionRow(title="Resolution Scale (%)", subtitle="Lower to reduce decode latency")
+        scale_row.add_suffix(self.scale_spin)
+        group_stream.add(scale_row)
 
         # Monitor Settings Group
         group_monitor = Adw.PreferencesGroup(title="Virtual Monitor Settings")
@@ -134,6 +135,25 @@ class NativeSunshineApp(Adw.Application):
         
         main_box.append(self.launch_btn)
 
+        # Telemetry Group (hidden by default)
+        self.telemetry_group = Adw.PreferencesGroup(title="Hardware Telemetry (Live)")
+        self.telemetry_group.set_visible(False)
+        page.add(self.telemetry_group)
+
+        self.telemetry_max_fps = Adw.ActionRow(title="Max Decoder FPS")
+        self.telemetry_max_fps.add_suffix(Gtk.Label(label="--"))
+        self.telemetry_group.add(self.telemetry_max_fps)
+
+        self.telemetry_refresh = Adw.ActionRow(title="Display Refresh Rate")
+        self.telemetry_refresh.add_suffix(Gtk.Label(label="--"))
+        self.telemetry_group.add(self.telemetry_refresh)
+
+        self.telemetry_low_latency = Adw.ActionRow(title="Low-Latency API Support")
+        self.telemetry_low_latency.add_suffix(Gtk.Label(label="--"))
+        self.telemetry_group.add(self.telemetry_low_latency)
+
+        self.telemetry_timer = None
+
         win.set_content(main_box)
         win.present()
 
@@ -147,12 +167,13 @@ class NativeSunshineApp(Adw.Application):
         self.config["bitrate"] = int(spin.get_value())
         self.save_config()
 
-    def on_framerate_changed(self, spin):
-        self.config["framerate"] = int(spin.get_value())
-        self.save_config()
 
     def on_keyframe_changed(self, spin):
         self.config["keyframe_interval"] = int(spin.get_value())
+        self.save_config()
+
+    def on_scale_changed(self, spin):
+        self.config["resolution_scale"] = int(spin.get_value())
         self.save_config()
 
     def on_placement_changed(self, combo, pspec):
@@ -170,8 +191,16 @@ class NativeSunshineApp(Adw.Application):
             self.launch_btn.set_label("Launch Stream")
             self.launch_btn.remove_css_class("destructive-action")
             self.launch_btn.add_css_class("suggested-action")
+            self.telemetry_group.set_visible(False)
+            if self.telemetry_timer:
+                GLib.source_remove(self.telemetry_timer)
+                self.telemetry_timer = None
         else:
             # Start the stream
+            # Clean up old telemetry file
+            if os.path.exists("/tmp/native-sunshine-telemetry.json"):
+                os.remove("/tmp/native-sunshine-telemetry.json")
+            
             # ensure native-sunshine.sh is executable
             os.chmod(MAIN_SCRIPT, 0o755)
             self.stream_process = subprocess.Popen([MAIN_SCRIPT])
@@ -179,8 +208,24 @@ class NativeSunshineApp(Adw.Application):
             self.launch_btn.remove_css_class("suggested-action")
             self.launch_btn.add_css_class("destructive-action")
             
-            # Watch process
+            # Watch process and telemetry
             GLib.timeout_add(1000, self.check_process_status)
+            self.telemetry_timer = GLib.timeout_add(500, self.poll_telemetry)
+
+    def poll_telemetry(self):
+        telemetry_file = "/tmp/native-sunshine-telemetry.json"
+        if os.path.exists(telemetry_file):
+            try:
+                with open(telemetry_file, 'r') as f:
+                    data = json.load(f)
+                    self.telemetry_max_fps.set_subtitle(f"{data.get('maxFps', '--')} fps")
+                    self.telemetry_refresh.set_subtitle(f"{data.get('refreshRate', '--')} Hz")
+                    self.telemetry_low_latency.set_subtitle("Yes" if data.get('lowLatency', 'false') == "true" else "No")
+                    self.telemetry_group.set_visible(True)
+            except Exception:
+                pass
+            return False # Stop polling once found
+        return True # Keep polling
 
     def check_process_status(self):
         if self.stream_process and self.stream_process.poll() is not None:
@@ -188,6 +233,10 @@ class NativeSunshineApp(Adw.Application):
             self.launch_btn.set_label("Launch Stream")
             self.launch_btn.remove_css_class("destructive-action")
             self.launch_btn.add_css_class("suggested-action")
+            self.telemetry_group.set_visible(False)
+            if self.telemetry_timer:
+                GLib.source_remove(self.telemetry_timer)
+                self.telemetry_timer = None
             return False
         return True
 
