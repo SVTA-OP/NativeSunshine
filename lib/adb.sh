@@ -124,8 +124,8 @@ get_client_display_metrics() {
         local h="${wm_size#*x}"
         
         # Hardware video encoders/decoders require dimensions to be a multiple of 16.
-        w=$(( (w / 16) * 16 ))
-        h=$(( (h / 16) * 16 ))
+        # w=$(( (w / 16) * 16 ))
+        # h=$(( (h / 16) * 16 ))
         
         # Get Orientation
         local orientation

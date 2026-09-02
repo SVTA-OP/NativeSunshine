@@ -14,7 +14,7 @@ TARGET_HEIGHT=1340
 # `adb shell dumpsys display` — no 120Hz mode exists on this hardware).
 # adb.sh overrides this at runtime anyway, but keep the resting default
 # honest so a fresh checkout doesn't start by assuming 120.
-TARGET_REFRESH=60
+TARGET_REFRESH=120
 
 # -----------------------------------------------------------------------------
 # Encoding
