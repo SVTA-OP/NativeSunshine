@@ -45,7 +45,10 @@ _build_vulkan_pipeline() {
 
     local w="${TARGET_WIDTH:-800}"
     local h="${TARGET_HEIGHT:-1340}"
-    local fps="${TARGET_REFRESH:-60}"
+    # Cap encoder framerate to 60. The A7 Lite's MT8768T hardware decoder is
+    # physically limited to ~60fps at 800x1340 (H.264 Level 4.0 bounds). Feeding
+    # it 120fps overloads the silicon and causes a hard freeze/panic.
+    local fps=60
     # NOTE: encoding at the exact target resolution (no manual alignment).
     # H.264 always pads internally to 16px macroblocks and signals the true
     # display size via SPS frame-cropping, so the decoder should see 800x1340
@@ -120,7 +123,7 @@ pipewiresrc
   !
   videorate
   !
-  video/x-raw, width=${w}, height=${h}, framerate=${TARGET_REFRESH:-60}/1
+  video/x-raw, width=${w}, height=${h}, framerate=60/1
   !
   queue max-size-buffers=5
   !
@@ -167,7 +170,7 @@ pipewiresrc
   !
   videorate
   !
-  video/x-raw, format=I420, width=${w}, height=${h}, framerate=${TARGET_REFRESH:-60}/1
+  video/x-raw, format=I420, width=${w}, height=${h}, framerate=60/1
   !
   queue max-size-buffers=5
   !
@@ -212,7 +215,7 @@ pipewiresrc
   !
   videorate
   !
-  video/x-raw, width=${w}, height=${h}, framerate=${TARGET_REFRESH:-60}/1
+  video/x-raw, width=${w}, height=${h}, framerate=60/1
   !
   queue max-size-buffers=5
   !
