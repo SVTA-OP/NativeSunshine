@@ -45,9 +45,22 @@ _build_vulkan_pipeline() {
 
     local w="${TARGET_WIDTH:-800}"
     local h="${TARGET_HEIGHT:-1340}"
-    # Align to 32px to fix Vulkan encoder corruption (half green screen) on odd resolutions
-    w=$(( (w / 32) * 32 ))
-    h=$(( (h / 32) * 32 ))
+    local fps="${TARGET_REFRESH:-60}"
+    # NOTE: encoding at the exact target resolution (no manual alignment).
+    # H.264 always pads internally to 16px macroblocks and signals the true
+    # display size via SPS frame-cropping, so the decoder should see 800x1340
+    # regardless of internal padding.
+    # KNOWN ISSUE: vulkanh264enc (RADV) has a history of corrupting/half-green
+    # frames on heights that aren't 32-aligned (1340 is not). If that
+    # resurfaces here, it's a RADV-specific SPS-cropping bug — fall back to
+    # the vaapi or software encoder rather than re-adding alignment math,
+    # since re-aligning here just reintroduces the host/decoder size mismatch.
+    #
+    # Explicit framerate: without this, vulkanh264enc has been observed
+    # signaling framerate=120 in the SPS VUI (see h264parse "exceeds allowed
+    # maximum" warnings) regardless of what's actually delivered, which
+    # desyncs its own rate-control/GOP timing model from reality. Pin it to
+    # the real detected refresh so the encoder isn't guessing.
 
     cat <<EOF
 pipewiresrc
@@ -59,7 +72,9 @@ pipewiresrc
   !
   videoscale method=0
   !
-  video/x-raw, format=NV12, width=${w}, height=${h}
+  videorate
+  !
+  video/x-raw, format=NV12, width=${w}, height=${h}, framerate=${fps}/1
   !
   queue max-size-buffers=5
   !
@@ -91,6 +106,8 @@ _build_nvenc_pipeline() {
     local port="$2"
     local bitrate="${STREAM_BITRATE:-8000}"
     local keyint="${KEYFRAME_INTERVAL:-60}"
+    local w="${TARGET_WIDTH:-800}"
+    local h="${TARGET_HEIGHT:-1340}"
 
     cat <<EOF
 pipewiresrc
@@ -99,7 +116,11 @@ pipewiresrc
   !
   videoconvert n-threads=0
   !
-  video/x-raw
+  videoscale method=0
+  !
+  videorate
+  !
+  video/x-raw, width=${w}, height=${h}, framerate=${TARGET_REFRESH:-60}/1
   !
   queue max-size-buffers=5
   !
@@ -131,6 +152,8 @@ _build_software_pipeline() {
     local port="$2"
     local bitrate="${STREAM_BITRATE:-8000}"
     local keyint="${KEYFRAME_INTERVAL:-60}"
+    local w="${TARGET_WIDTH:-800}"
+    local h="${TARGET_HEIGHT:-1340}"
 
     # x264enc bitrate is in kbit/s
     cat <<EOF
@@ -140,7 +163,11 @@ pipewiresrc
   !
   videoconvert n-threads=0
   !
-  video/x-raw, format=I420
+  videoscale method=0
+  !
+  videorate
+  !
+  video/x-raw, format=I420, width=${w}, height=${h}, framerate=${TARGET_REFRESH:-60}/1
   !
   queue max-size-buffers=5
   !
@@ -173,6 +200,8 @@ _build_vaapi_pipeline() {
     local port="$2"
     local bitrate="${STREAM_BITRATE:-8000}"
     local keyint="${KEYFRAME_INTERVAL:-60}"
+    local w="${TARGET_WIDTH:-800}"
+    local h="${TARGET_HEIGHT:-1340}"
 
     cat <<EOF
 pipewiresrc
@@ -180,6 +209,10 @@ pipewiresrc
     do-timestamp=true
   !
   vapostproc
+  !
+  videorate
+  !
+  video/x-raw, width=${w}, height=${h}, framerate=${TARGET_REFRESH:-60}/1
   !
   queue max-size-buffers=5
   !

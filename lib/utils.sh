@@ -88,6 +88,7 @@ check_deps() {
                 "tcpclientsink:gstreamer1.0-plugins-good (net)"
                 "h264parse:gstreamer1.0-plugins-bad"
                 "queue:gstreamer1.0-plugins-base"
+                "videorate:gstreamer / gst-plugins-base"
             )
             ;;
         vulkan)
@@ -99,6 +100,7 @@ check_deps() {
                 "tcpclientsink:gst-plugins-good"
                 "h264parse:gst-plugins-bad"
                 "queue:gst-plugins-base"
+                "videorate:gstreamer / gst-plugins-base"
             )
             ;;
         nvenc)
@@ -108,6 +110,7 @@ check_deps() {
                 "tcpclientsink:gstreamer1.0-plugins-good (net)"
                 "h264parse:gstreamer1.0-plugins-bad"
                 "queue:gstreamer1.0-plugins-base"
+                "videorate:gstreamer / gst-plugins-base"
             )
             ;;
         software)
@@ -117,6 +120,7 @@ check_deps() {
                 "tcpclientsink:gstreamer1.0-plugins-good (net)"
                 "h264parse:gstreamer1.0-plugins-bad"
                 "queue:gstreamer1.0-plugins-base"
+                "videorate:gstreamer / gst-plugins-base"
             )
             ;;
     esac

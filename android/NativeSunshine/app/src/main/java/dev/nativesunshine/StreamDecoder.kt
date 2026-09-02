@@ -2,6 +2,7 @@ package dev.nativesunshine
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
 import android.util.Log
@@ -46,6 +47,19 @@ class StreamDecoder(
     private var codec: MediaCodec? = null
     private val isRunning = AtomicBoolean(false)
     private val firstFrameFired = AtomicBoolean(false)
+    private var pendingSurface: Surface? = null
+    private var codecConfigured = false
+
+    // Render pacing: the A7 Lite panel is hardware-limited to 60Hz (confirmed
+    // via dumpsys — no 120Hz mode exists on this device), but the host may
+    // capture/encode at a higher rate for smoother motion sampling. We pace
+    // *output* to wall-clock time rather than decimating by a fixed frame
+    // count, so it self-adapts to whatever rate actually arrives instead of
+    // assuming a specific capture fps. This is independent of the reactive
+    // backpressure drop below, which remains purely a safety valve for input
+    // buffer starvation, not a smoothing mechanism.
+    private val renderIntervalNs = 1_000_000_000L / 60
+    private var lastRenderNs = 0L
 
     // Queue of byte arrays from SocketReader → queueThread → MediaCodec
     private val dataQueue = LinkedBlockingQueue<ByteArray>(2048)
@@ -85,18 +99,11 @@ class StreamDecoder(
 
         firstFrameFired.set(false)
         dataQueue.clear()
+        frameBufLen = 0
+        pendingSurface = surface
+        codecConfigured = false
 
-        try {
-            setupCodec(surface)
-        } catch (e: Exception) {
-            Log.e(TAG, "Codec setup failed: ${e.message}", e)
-            isRunning.set(false)
-            onError("Codec setup failed: ${e.message}")
-            return
-        }
-
-        startQueueThread()
-        Log.i(TAG, "Decoder started")
+        Log.i(TAG, "Decoder waiting for SPS to configure codec")
     }
 
     /** Feed raw H.264 byte-stream data. Thread-safe; called from SocketReader. */
@@ -128,10 +135,36 @@ class StreamDecoder(
                 if (actualStart > 0) {
                     // Extract the complete NAL unit
                     val frame = frameBuf.copyOfRange(0, actualStart)
-                    try {
-                        dataQueue.put(frame) // Blocks applying backpressure
-                    } catch (e: InterruptedException) { 
-                        return 
+
+                    if (!codecConfigured) {
+                        val sclen = getStartCodeLen(frame, 0, frame.size)
+                        if (sclen > 0 && sclen < frame.size && (frame[sclen].toInt() and 0x1F) == 7) {
+                            val dims = parseSpsDimensions(frame, sclen)
+                            val surface = pendingSurface
+                            if (dims != null && surface != null) {
+                                try {
+                                    setupCodec(surface, dims.first, dims.second)
+                                    codecConfigured = true
+                                    startQueueThread()
+                                    Log.i(TAG, "Decoder started")
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Codec setup failed: ${e.message}", e)
+                                    isRunning.set(false)
+                                    onError("Codec setup failed: ${e.message}")
+                                    return
+                                }
+                            } else {
+                                Log.w(TAG, "Could not parse SPS dimensions — waiting for next SPS")
+                            }
+                        }
+                    }
+
+                    if (codecConfigured) {
+                        try {
+                            dataQueue.put(frame) // Blocks applying backpressure
+                        } catch (e: InterruptedException) {
+                            return
+                        }
                     }
                     
                     // Shift the remaining data (including the start code) to the beginning
@@ -173,6 +206,8 @@ class StreamDecoder(
         dataQueue.clear()
         queueThread?.interrupt()
         queueThread = null
+        codecConfigured = false
+        pendingSurface = null
         releaseCodec()
     }
 
@@ -189,15 +224,116 @@ class StreamDecoder(
         }
     }
 
+    // ── SPS parsing (Exp-Golomb) ─────────────────────────────────────────────
+    // The host's actual stream resolution is auto-detected at launch and can
+    // differ from any value we might assume on the Android side (it has
+    // drifted twice now: 800x1312 vs 800x1328 vs 800x1340 depending on
+    // alignment/inset logic upstream). Rather than hardcode a guess, parse
+    // the true width/height out of the SPS NAL itself — this is the single
+    // source of truth the encoder actually used.
+    private class BitReader(data: ByteArray) {
+        private val rbsp: ByteArray
+        private var bytePos = 0
+        private var bitPos = 0
+        init {
+            // Strip emulation-prevention bytes (00 00 03 -> 00 00) before parsing
+            val out = ByteArray(data.size)
+            var len = 0
+            var zeroRun = 0
+            for (b in data) {
+                if (zeroRun >= 2 && b == 0x03.toByte()) {
+                    zeroRun = 0
+                    continue
+                }
+                out[len++] = b
+                zeroRun = if (b == 0.toByte()) zeroRun + 1 else 0
+            }
+            rbsp = out.copyOf(len)
+        }
+        fun readBit(): Int {
+            val byte = rbsp[bytePos].toInt() and 0xFF
+            val bit = (byte shr (7 - bitPos)) and 1
+            bitPos++
+            if (bitPos == 8) { bitPos = 0; bytePos++ }
+            return bit
+        }
+        fun readBits(n: Int): Int {
+            var v = 0
+            repeat(n) { v = (v shl 1) or readBit() }
+            return v
+        }
+        fun readUE(): Int {
+            var zeros = 0
+            while (readBit() == 0) zeros++
+            if (zeros == 0) return 0
+            var v = 1
+            repeat(zeros) { v = (v shl 1) or readBit() }
+            return v - 1
+        }
+    }
+
+    /** Parses width/height out of a raw H.264 SPS NAL (start code + header included). */
+    private fun parseSpsDimensions(nal: ByteArray, startCodeLen: Int): Pair<Int, Int>? {
+        return try {
+            val rbspBytes = nal.copyOfRange(startCodeLen + 1, nal.size) // skip start code + NAL header byte
+            val br = BitReader(rbspBytes)
+            val profileIdc = br.readBits(8)
+            br.readBits(8) // constraint flags + reserved
+            br.readBits(8) // level_idc
+            br.readUE()    // seq_parameter_set_id
+            if (profileIdc in intArrayOf(100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135)) {
+                // High-profile fields we don't expect from our constrained-baseline
+                // encoders; bail rather than risk a wrong parse.
+                return null
+            }
+            br.readUE() // log2_max_frame_num_minus4
+            val picOrderCntType = br.readUE()
+            if (picOrderCntType == 0) {
+                br.readUE() // log2_max_pic_order_cnt_lsb_minus4
+            } else if (picOrderCntType == 1) {
+                return null // not expected from our encoders; bail rather than mis-parse
+            }
+            br.readUE()  // max_num_ref_frames
+            br.readBit() // gaps_in_frame_num_value_allowed_flag
+            val picWidthInMbsMinus1 = br.readUE()
+            val picHeightInMapUnitsMinus1 = br.readUE()
+            val frameMbsOnlyFlag = br.readBit()
+            if (frameMbsOnlyFlag == 0) br.readBit() // mb_adaptive_frame_field_flag
+            br.readBit() // direct_8x8_inference_flag
+            var cropLeft = 0; var cropRight = 0; var cropTop = 0; var cropBottom = 0
+            if (br.readBit() == 1) { // frame_cropping_flag
+                cropLeft = br.readUE(); cropRight = br.readUE()
+                cropTop = br.readUE(); cropBottom = br.readUE()
+            }
+            val width = (picWidthInMbsMinus1 + 1) * 16 - (cropLeft + cropRight) * 2
+            val frameHeightInMbs = (2 - frameMbsOnlyFlag) * (picHeightInMapUnitsMinus1 + 1)
+            val height = frameHeightInMbs * 16 - (cropTop + cropBottom) * (2 - frameMbsOnlyFlag) * 2
+            Pair(width, height)
+        } catch (e: Exception) {
+            Log.w(TAG, "SPS parse failed: ${e.message}")
+            null
+        }
+    }
+
     // ── Codec setup ───────────────────────────────────────────────────────────
 
-    private fun setupCodec(surface: Surface) {
-        // Use the 16-aligned dimensions matching the host stream.
-        // The host already computes (screenPx / 16) * 16 before streaming,
-        // so we mirror that calculation here so decoder and stream agree exactly.
-        val metrics = android.content.res.Resources.getSystem().displayMetrics
-        val streamWidth  = (metrics.widthPixels  / 16) * 16
-        val streamHeight = (metrics.heightPixels / 16) * 16
+    private fun setupCodec(surface: Surface, streamWidth: Int, streamHeight: Int) {
+        Log.i(TAG, "Configuring codec for actual stream size: ${streamWidth}x${streamHeight}")
+
+        // Diagnostic: log what the MTK decoder actually claims to support at
+        // this resolution before we commit to a 120fps-capture plan. If the
+        // reported max is well under 120, decode-side smoothing is moot —
+        // the hardware itself can't keep up regardless of how we pace output.
+        try {
+            val caps = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+                .codecInfos.firstOrNull { it.name == findH264Decoder() }
+                ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                ?.videoCapabilities
+            val range = caps?.getSupportedFrameRatesFor(streamWidth, streamHeight)
+            Log.i(TAG, "Decoder-reported supported frame rate at ${streamWidth}x${streamHeight}: $range")
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not query decoder frame rate capability: ${e.message}")
+        }
 
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_AVC,
@@ -268,7 +404,11 @@ class StreamDecoder(
     private fun runQueueLoop() {
         val c = codec ?: return
         var presentationUs = 0L
-        val frameDurationUs = 1_000_000L / 60  // 60 fps
+        // This no longer drives render timing — actual pacing happens in
+        // drainOutput() against wall-clock time, since the source frame rate
+        // can vary (60Hz decode-only, or a higher capture rate decimated
+        // down). This is just a monotonic key for latencyMap bookkeeping.
+        val frameDurationUs = 1_000L
 
         try {
             while (isRunning.get()) {
@@ -349,12 +489,21 @@ class StreamDecoder(
                         latencyCount++
                     }
                     framesRendered++
-                    
-                    // If forceDrop is true, return buffer to codec immediately without rendering.
-                    // This prevents deadlocks when the Surface is consuming slower than the feed (e.g. 120Hz feed on 60Hz display).
-                    c.releaseOutputBuffer(outIdx, !forceDrop)
-                    if (!forceDrop && !firstFrameFired.getAndSet(true)) {
-                        onFirstFrame()
+
+                    // Pace to a real 60Hz wall-clock interval regardless of
+                    // how fast frames actually arrive. This gives even 2:1 (or
+                    // N:1) decimation when the source runs faster than the
+                    // panel, instead of dropping only under buffer pressure.
+                    val now = System.nanoTime()
+                    val duePaced = (now - lastRenderNs) >= renderIntervalNs
+                    val shouldRender = !forceDrop && duePaced
+
+                    c.releaseOutputBuffer(outIdx, shouldRender)
+                    if (shouldRender) {
+                        lastRenderNs = now
+                        if (!firstFrameFired.getAndSet(true)) {
+                            onFirstFrame()
+                        }
                     }
                 }
                 outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
