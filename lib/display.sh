@@ -36,8 +36,26 @@ get_pipewire_node_id() {
     local node_id
     
     if [[ "${TARGET_DISPLAY:-virtual}" == "virtual" ]]; then
-        log_info "Creating dynamic virtual monitor (${TARGET_WIDTH}x${TARGET_HEIGHT})..."
-        node_id=$(_create_pw_node_virtual "$TARGET_WIDTH" "$TARGET_HEIGHT") || return 1
+        local vconn
+        vconn=$(python3 -c "
+import dbus
+bus = dbus.SessionBus()
+obj = bus.get_object('org.gnome.Mutter.DisplayConfig', '/org/gnome/Mutter/DisplayConfig')
+iface = dbus.Interface(obj, 'org.gnome.Mutter.DisplayConfig')
+serial, monitors, logical_monitors, properties = iface.GetCurrentState()
+for m in monitors:
+    connector = m[0][0]
+    if 'Virtual' in connector or 'HEADLESS' in connector or 'Meta' in connector:
+        print(connector)
+        break
+" 2>/dev/null)
+        if [[ -z "$vconn" ]]; then
+            log_error "Could not find Virtual Monitor in PipeWire."
+            log_error "Ensure the systemd override is installed and you have restarted GNOME."
+            return 1
+        fi
+        log_info "Recording virtual display ${vconn}..."
+        node_id=$(_get_pw_node_headless "$vconn") || return 1
     else
         log_info "Recording existing display ${TARGET_DISPLAY}..."
         node_id=$(_get_pw_node_headless "$TARGET_DISPLAY") || return 1
@@ -53,34 +71,7 @@ get_pipewire_node_id() {
     return 0
 }
 
-_create_pw_node_virtual() {
-    local w="$1"
-    local h="$2"
-    local out_file="/tmp/ns_mutter_out"
-    rm -f "$out_file"
-    
-    python3 "${SCRIPT_DIR}/lib/mutter_create_virtual.py" "$w" "$h" > "$out_file" &
-    export MUTTER_SCREENCAST_PID=$!
-    
-    local i
-    for i in {1..50}; do
-        if [[ -s "$out_file" ]]; then
-            local node_id
-            node_id=$(cat "$out_file")
-            if [[ "$node_id" =~ ^[0-9]+$ ]]; then
-                echo "$node_id"
-                rm -f "$out_file"
-                return 0
-            fi
-        fi
-        sleep 0.1
-    done
-    
-    echo "Failed to get PipeWire node ID from virtual screencast." >&2
-    rm -f "$out_file"
-    kill "$MUTTER_SCREENCAST_PID" 2>/dev/null || true
-    return 1
-}
+
 
 _get_pw_node_headless() {
     local connector="$1"

@@ -43,15 +43,23 @@ _build_vulkan_pipeline() {
     # vulkanupload: copies frames from CPU/PipeWire memory into Vulkan GPU memory
     # (required before vulkanh264enc which only accepts VulkanImage memory)
 
+    local w="${TARGET_WIDTH:-800}"
+    local h="${TARGET_HEIGHT:-1340}"
+    # Align to 32px to fix Vulkan encoder corruption (half green screen) on odd resolutions
+    w=$(( (w / 32) * 32 ))
+    h=$(( (h / 32) * 32 ))
+
     cat <<EOF
 pipewiresrc
     path=${node_id}
     do-timestamp=true
     keepalive-time=16
   !
-  videoconvert
+  videoconvert n-threads=0
   !
-  video/x-raw, width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, max-framerate=${TARGET_REFRESH}/1, format=NV12
+  videoscale method=0
+  !
+  video/x-raw, format=NV12, width=${w}, height=${h}
   !
   queue max-size-buffers=5
   !
@@ -61,20 +69,17 @@ pipewiresrc
     rate-control=cbr
     bitrate=${bitrate}
     idr-period=${keyint}
+    quality=1
   !
   video/x-h264,
     stream-format=byte-stream,
     alignment=au,
-    profile=main
+    profile=constrained-baseline
   !
   h264parse
     config-interval=-1
   !
-  tcpclientsink
-    host=127.0.0.1
-    port=${port}
-    sync=false
-    max-lateness=-1
+  fdsink fd=1 sync=false
 EOF
 }
 
@@ -92,9 +97,9 @@ pipewiresrc
     path=${node_id}
     do-timestamp=true
   !
-  videoconvert
+  videoconvert n-threads=0
   !
-  video/x-raw, width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, max-framerate=${TARGET_REFRESH}/1
+  video/x-raw
   !
   queue max-size-buffers=5
   !
@@ -109,15 +114,12 @@ pipewiresrc
   video/x-h264,
     stream-format=byte-stream,
     alignment=au,
-    profile=main
+    profile=constrained-baseline
   !
   h264parse
     config-interval=-1
   !
-  tcpclientsink
-    host=127.0.0.1
-    port=${port}
-    sync=false
+  fdsink fd=1 sync=false
 EOF
 }
 
@@ -136,9 +138,9 @@ pipewiresrc
     path=${node_id}
     do-timestamp=true
   !
-  videoconvert
+  videoconvert n-threads=0
   !
-  video/x-raw, width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, max-framerate=${TARGET_REFRESH}/1, format=I420
+  video/x-raw, format=I420
   !
   queue max-size-buffers=5
   !
@@ -154,15 +156,12 @@ pipewiresrc
   video/x-h264,
     stream-format=byte-stream,
     alignment=au,
-    profile=main
+    profile=constrained-baseline
   !
   h264parse
     config-interval=-1
   !
-  tcpclientsink
-    host=127.0.0.1
-    port=${port}
-    sync=false
+  fdsink fd=1 sync=false
 EOF
 }
 
@@ -180,30 +179,24 @@ pipewiresrc
     path=${node_id}
     do-timestamp=true
   !
-  video/x-raw, width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, max-framerate=${TARGET_REFRESH}/1
-  !
-  vaapipostproc
+  vapostproc
   !
   queue max-size-buffers=5
   !
-  vaapih264enc
+  vah264enc
     bitrate=${bitrate}
-    keyframe-period=${keyint}
+    key-int-max=${keyint}
     rate-control=cbr
-    tune=low-power
   !
   video/x-h264,
     stream-format=byte-stream,
     alignment=au,
-    profile=main
+    profile=constrained-baseline
   !
   h264parse
     config-interval=-1
   !
-  tcpclientsink
-    host=127.0.0.1
-    port=${port}
-    sync=false
+  fdsink fd=1 sync=false
 EOF
 }
 
@@ -256,16 +249,35 @@ launch_pipeline() {
     local pipeline_oneline
     pipeline_oneline=$(echo "$pipeline" | tr -s ' \n\t' ' ' | sed 's/^ //;s/ $//')
 
+    local port="${ADB_STREAM_PORT:-7878}"
+
+    # Kill any stale gst-launch or socat processes from previous sessions
+    pkill -f "gst-launch.*fdsink" 2>/dev/null || true
+    pkill -f "socat.*TCP.*${port}" 2>/dev/null || true
+    sleep 0.2
+
+    # Use a named pipe to decouple gst-launch and socat so we can track both PIDs.
+    local fifo
+    fifo=$(mktemp -u /tmp/nativesunshine-pipe-XXXX)
+    mkfifo "$fifo"
+
+    # Start gst-launch writing into the named pipe
     "${gst_bin}" -e ${PIPELINE_LOG:+--gst-debug-level=2} \
         ${pipeline_oneline} \
-        >> "$log" 2>&1 &
+        2>>"$log" >"$fifo" &
+    export GST_PID=$!
 
+    # Start socat reading from the pipe and forwarding to Android
+    socat - "TCP:127.0.0.1:${port},nodelay" <"$fifo" &
     export PIPELINE_PID=$!
+
+    # Clean up the fifo path (the pipe stays open via FDs)
+    rm -f "$fifo"
 
     # Give it a moment to fail fast (bad plugin, wrong node ID, etc.)
     sleep 1
 
-    if ! kill -0 "${PIPELINE_PID}" 2>/dev/null; then
+    if ! kill -0 "${PIPELINE_PID}" 2>/dev/null && ! kill -0 "${GST_PID}" 2>/dev/null; then
         log_error "GStreamer pipeline exited immediately."
         log_error "Check pipeline log: ${log}"
         log_error "Common causes:"
@@ -286,29 +298,35 @@ launch_pipeline() {
 # -----------------------------------------------------------------------------
 stop_pipeline() {
     local pid="${1:-${PIPELINE_PID}}"
+    local gst_pid="${GST_PID:-}"
 
     if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
-        log_info "Pipeline not running, nothing to stop."
-        return 0
+        # Also check gst_pid
+        if [[ -z "$gst_pid" ]] || ! kill -0 "$gst_pid" 2>/dev/null; then
+            log_info "Pipeline not running, nothing to stop."
+            return 0
+        fi
     fi
 
     log_step "Stopping GStreamer pipeline (PID: ${pid})"
 
     # SIGINT → gst-launch-1.0 sends EOS and flushes
     kill -SIGINT "$pid" 2>/dev/null || true
+    [[ -n "$gst_pid" ]] && kill -SIGINT "$gst_pid" 2>/dev/null || true
+
+    # Also kill any remaining gst-launch or socat by name (belt-and-suspenders)
+    pkill -f "gst-launch.*fdsink" 2>/dev/null || true
 
     # Wait up to 5 seconds for clean exit
     local i=0
-    while kill -0 "$pid" 2>/dev/null && [[ $i -lt 5 ]]; do
+    while { kill -0 "$pid" 2>/dev/null || { [[ -n "$gst_pid" ]] && kill -0 "$gst_pid" 2>/dev/null; }; } && [[ $i -lt 5 ]]; do
         sleep 1
-        (( i++ ))
+        (( ++i )) || true
     done
 
     # Force kill if still alive
-    if kill -0 "$pid" 2>/dev/null; then
-        log_warn "Pipeline did not exit cleanly; sending SIGKILL..."
-        kill -SIGKILL "$pid" 2>/dev/null || true
-    fi
+    kill -SIGKILL "$pid" 2>/dev/null || true
+    [[ -n "$gst_pid" ]] && kill -SIGKILL "$gst_pid" 2>/dev/null || true
 
     wait "$pid" 2>/dev/null || true
     log_success "Pipeline stopped."

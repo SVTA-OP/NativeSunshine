@@ -57,6 +57,10 @@ class StreamDecoder(
     private val latencyMap = java.util.concurrent.ConcurrentHashMap<Long, Long>()
     private var totalLatencyNs = 0L
     private var latencyCount = 0
+    
+    // NAL unit framing buffers
+    private val frameBuf = ByteArray(2 * 1024 * 1024) // 2MB max frame
+    private var frameBufLen = 0
 
     private var queueThread: Thread? = null
     private var outputThread: Thread? = null
@@ -98,15 +102,54 @@ class StreamDecoder(
     /** Feed raw H.264 byte-stream data. Thread-safe; called from SocketReader. */
     fun feedData(buf: ByteArray, offset: Int, length: Int) {
         if (!isRunning.get()) return
-        // Copy the relevant slice (buf is reused by SocketReader)
-        val chunk = buf.copyOfRange(offset, offset + length)
-        try {
-            dataQueue.put(chunk) // Blocks until space is available, applying backpressure via TCP
-            bytesReceived += length
-            checkStats()
-        } catch (e: InterruptedException) {
-            Log.d(TAG, "feedData interrupted")
+        
+        // Ensure we don't overflow the buffer (e.g., heavily corrupted stream)
+        if (frameBufLen + length > frameBuf.size) {
+            Log.e(TAG, "Frame buffer overflow! Dropping corrupted stream data.")
+            frameBufLen = 0
         }
+        
+        System.arraycopy(buf, offset, frameBuf, frameBufLen, length)
+        frameBufLen += length
+        
+        var searchIdx = 0
+        while (searchIdx <= frameBufLen - 3) {
+            // Find Annex B start codes (00 00 01)
+            if (frameBuf[searchIdx] == 0.toByte() && frameBuf[searchIdx+1] == 0.toByte() && frameBuf[searchIdx+2] == 1.toByte()) {
+                
+                var actualStart = searchIdx
+                var advance = 3
+                // Check if it's a 4-byte start code (00 00 00 01)
+                if (searchIdx > 0 && frameBuf[searchIdx - 1] == 0.toByte()) {
+                    actualStart = searchIdx - 1
+                    advance = 4
+                }
+                
+                if (actualStart > 0) {
+                    // Extract the complete NAL unit
+                    val frame = frameBuf.copyOfRange(0, actualStart)
+                    try {
+                        dataQueue.put(frame) // Blocks applying backpressure
+                    } catch (e: InterruptedException) { 
+                        return 
+                    }
+                    
+                    // Shift the remaining data (including the start code) to the beginning
+                    val remaining = frameBufLen - actualStart
+                    System.arraycopy(frameBuf, actualStart, frameBuf, 0, remaining)
+                    frameBufLen = remaining
+                    searchIdx = advance
+                } else {
+                    // Start code is at the very beginning, skip past it to find the next one
+                    searchIdx += advance
+                }
+            } else {
+                searchIdx++
+            }
+        }
+        
+        bytesReceived += length
+        checkStats()
     }
 
     private fun checkStats() {
@@ -149,26 +192,26 @@ class StreamDecoder(
     // ── Codec setup ───────────────────────────────────────────────────────────
 
     private fun setupCodec(surface: Surface) {
+        // Use the 16-aligned dimensions matching the host stream.
+        // The host already computes (screenPx / 16) * 16 before streaming,
+        // so we mirror that calculation here so decoder and stream agree exactly.
+        val metrics = android.content.res.Resources.getSystem().displayMetrics
+        val streamWidth  = (metrics.widthPixels  / 16) * 16
+        val streamHeight = (metrics.heightPixels / 16) * 16
+
         val format = MediaFormat.createVideoFormat(
-            MediaFormat.MIMETYPE_VIDEO_AVC,   // H.264
-            800,   // matches TARGET_WIDTH in config.sh
-            1340   // matches TARGET_HEIGHT in config.sh
+            MediaFormat.MIMETYPE_VIDEO_AVC,
+            streamWidth,
+            streamHeight
         ).apply {
             // Real-time priority — reduces decode latency
+            // NOTE: do NOT set KEY_LOW_LATENCY or KEY_OPERATING_RATE here.
+            // The MediaTek c2.mtk.avc.decoder crashes immediately (C2_CORRUPTED,
+            // err 0xe) if those hints are present in the format at configure time.
             setInteger(MediaFormat.KEY_PRIORITY, 0)
 
-            // Disable B-frame buffering on API 30+ (KEY_LOW_LATENCY)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-            }
-            
-            // Hint for high performance mode
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
-            }
-
-            // Generous input buffer for large SPS/PPS + IDR NAL units
-            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1 * 1024 * 1024)
+            // Input buffer: large enough for SPS/PPS + IDR NAL units
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
 
             // Frame rate hint for the decoder (matches encoder config)
             setInteger(MediaFormat.KEY_FRAME_RATE, 60)
@@ -227,94 +270,74 @@ class StreamDecoder(
         var presentationUs = 0L
         val frameDurationUs = 1_000_000L / 60  // 60 fps
 
-        val parseBuffer = ByteArray(2 * 1024 * 1024)
-        var parseLen = 0
-
         try {
             while (isRunning.get()) {
-                // Read available chunks
-                var chunk = dataQueue.poll(5, TimeUnit.MILLISECONDS)
-                while (chunk != null) {
-                    if (parseLen + chunk.size <= parseBuffer.size) {
-                        System.arraycopy(chunk, 0, parseBuffer, parseLen, chunk.size)
-                        parseLen += chunk.size
-                    } else {
-                        Log.w(TAG, "Parse buffer overflow, dropping data")
-                        parseLen = 0
-                    }
-                    chunk = dataQueue.poll()
+                val chunk = dataQueue.poll(5, TimeUnit.MILLISECONDS)
+                if (chunk == null) {
+                    drainOutput(c, false)
+                    continue
                 }
 
-                var searchStart = 0
-                while (searchStart < parseLen - 2) {
-                    val startCodeLen = getStartCodeLen(parseBuffer, searchStart, parseLen)
-                    if (startCodeLen > 0) {
-                        // Found a NAL start. Find the LAST start code in the buffer to batch all complete NAL units.
-                        var lastStart = -1
-                        var j = parseLen - 3
-                        while (j > searchStart) {
-                            if (getStartCodeLen(parseBuffer, j, parseLen) > 0) {
-                                lastStart = j
-                                break
-                            }
-                            j--
-                        }
-
-                        if (lastStart != -1) {
-                            val chunkLength = lastStart - searchStart
-                            
-                            var idx = -1
-                            while (isRunning.get()) {
-                                idx = c.dequeueInputBuffer(10_000L)
-                                if (idx >= 0) break
-                                // If input buffer is full, drain output to free up buffers
-                                drainOutput(c)
-                            }
-                            
-                            if (idx >= 0) {
-                                val inputBuf = c.getInputBuffer(idx)
-                                if (inputBuf != null) {
-                                    inputBuf.clear()
-                                    inputBuf.put(parseBuffer, searchStart, chunkLength)
-                                    latencyMap[presentationUs] = System.nanoTime()
-                                    c.queueInputBuffer(idx, 0, chunkLength, presentationUs, 0)
-                                    presentationUs += frameDurationUs
-                                }
-                            }
-                            searchStart = lastStart
-                        } else {
-                            break // Wait for more data to complete the NAL unit
-                        }
-                    } else {
-                        searchStart++
+                // Determine if this NAL unit is SPS (7) or PPS (8)
+                var flags = 0
+                val startCodeLen = getStartCodeLen(chunk, 0, chunk.size)
+                if (startCodeLen > 0 && startCodeLen < chunk.size) {
+                    val nalType = chunk[startCodeLen].toInt() and 0x1F
+                    if (nalType == 7 || nalType == 8) {
+                        flags = MediaCodec.BUFFER_FLAG_CODEC_CONFIG
                     }
                 }
 
-                // Shift unprocessed data to the front
-                if (searchStart > 0) {
-                    val remaining = parseLen - searchStart
-                    if (remaining > 0) {
-                        System.arraycopy(parseBuffer, searchStart, parseBuffer, 0, remaining)
+                var idx = -1
+                var retries = 0
+                while (isRunning.get()) {
+                    idx = c.dequeueInputBuffer(10_000L)
+                    if (idx >= 0) break
+                    // If input buffer is full, drain output to free up buffers.
+                    // If we retry, drop frames to relieve Surface backpressure.
+                    retries++
+                    drainOutput(c, forceDrop = (retries > 0))
+                }
+
+                if (idx >= 0) {
+                    val inputBuf = c.getInputBuffer(idx)
+                    if (inputBuf != null) {
+                        inputBuf.clear()
+                        inputBuf.put(chunk)
+                        
+                        if (flags == 0) latencyMap[presentationUs] = System.nanoTime()
+                        c.queueInputBuffer(idx, 0, chunk.size, presentationUs, flags)
+                        
+                        // Only advance presentation time for actual payload frames
+                        if (flags == 0) presentationUs += frameDurationUs
                     }
-                    parseLen = remaining
                 }
 
                 // Drain output — render any available decoded frames to the Surface
-                drainOutput(c)
+                drainOutput(c, false)
             }
         } catch (e: InterruptedException) {
             Log.d(TAG, "Queue thread interrupted (shutdown)")
+        } catch (e: IllegalStateException) {
+            // Thrown when codec is released while dequeueInputBuffer is blocking.
+            // Only report as error if we weren't intentionally stopping.
+            if (isRunning.get()) {
+                Log.e(TAG, "Queue loop codec error: ${e.message}", e)
+                onError("Queue thread error: ${e.message}")
+            } else {
+                Log.d(TAG, "Queue thread: codec stopped during shutdown (expected)")
+            }
         } catch (e: Exception) {
             if (isRunning.get()) {
-                Log.e(TAG, "Queue thread error: ${e.message}", e)
-                onError("Decoder error: ${e.message}")
+                Log.e(TAG, "Queue loop error: ${e.message}", e)
+                onError("Queue thread error: ${e.message}")
             }
         }
     }
 
     // ── Output draining ───────────────────────────────────────────────────────
 
-    private fun drainOutput(c: MediaCodec) {
+    private fun drainOutput(c: MediaCodec, forceDrop: Boolean) {
         val bufferInfo = MediaCodec.BufferInfo()
         while (true) {
             val outIdx = c.dequeueOutputBuffer(bufferInfo, 0L)  // non-blocking
@@ -327,9 +350,10 @@ class StreamDecoder(
                     }
                     framesRendered++
                     
-                    // Render to surface immediately (doRender = true)
-                    c.releaseOutputBuffer(outIdx, true)
-                    if (!firstFrameFired.getAndSet(true)) {
+                    // If forceDrop is true, return buffer to codec immediately without rendering.
+                    // This prevents deadlocks when the Surface is consuming slower than the feed (e.g. 120Hz feed on 60Hz display).
+                    c.releaseOutputBuffer(outIdx, !forceDrop)
+                    if (!forceDrop && !firstFrameFired.getAndSet(true)) {
                         onFirstFrame()
                     }
                 }

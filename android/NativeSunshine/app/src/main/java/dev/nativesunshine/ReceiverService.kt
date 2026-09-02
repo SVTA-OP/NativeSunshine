@@ -117,6 +117,21 @@ class ReceiverService : Service() {
         }.start()
     }
 
+    private fun sendErrorToHost(errorMsg: String) {
+        Thread {
+            try {
+                val escapedMsg = errorMsg.replace("\"", "\\\"").replace("\n", "\\n")
+                val json = """{"error":"$escapedMsg"}"""
+                val socket = java.net.Socket("127.0.0.1", 7879)
+                socket.outputStream.write(json.toByteArray())
+                socket.close()
+                Log.i(TAG, "Sent error message to host")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send error message: ${e.message}")
+            }
+        }.start()
+    }
+
     private fun startPipeline() {
         stopPipeline()
 
@@ -134,8 +149,10 @@ class ReceiverService : Service() {
             onError = { msg ->
                 Log.e(TAG, "Decoder error: $msg")
                 emitStatus(StreamStatus.ERROR(msg))
-                // Restart after a brief pause
-                android.os.Handler(mainLooper).postDelayed({ startPipeline() }, 2_000)
+                sendErrorToHost(msg)
+                // Stop the decoder cleanly; SocketReader's accept() loop will
+                // trigger a fresh decoder start on the next host connection.
+                streamDecoder?.stop()
             },
             onStatsUpdate = { fps, mbps, latencyMs ->
                 statsListener?.invoke(fps, mbps, latencyMs)
@@ -148,7 +165,23 @@ class ReceiverService : Service() {
                 Log.i(TAG, "Host connected")
                 emitStatus(StreamStatus.CONNECTING)
                 updateNotification("Connected — starting decode…")
-                // Configure and start the decoder once we know a stream is incoming
+                // Always create a fresh decoder on each new connection to guarantee clean state
+                streamDecoder?.stop()
+                streamDecoder = StreamDecoder(
+                    onFirstFrame = {
+                        emitStatus(StreamStatus.STREAMING)
+                        updateNotification("Streaming")
+                    },
+                    onError = { msg ->
+                        Log.e(TAG, "Decoder error: $msg")
+                        emitStatus(StreamStatus.ERROR(msg))
+                        sendErrorToHost(msg)
+                        streamDecoder?.stop()
+                    },
+                    onStatsUpdate = { fps, mbps, latencyMs ->
+                        statsListener?.invoke(fps, mbps, latencyMs)
+                    }
+                )
                 streamDecoder?.start(currentSurface)
             },
             onData = { buf, offset, length ->

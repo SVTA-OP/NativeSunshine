@@ -123,6 +123,10 @@ get_client_display_metrics() {
         local w="${wm_size%x*}"
         local h="${wm_size#*x}"
         
+        # Hardware video encoders/decoders require dimensions to be a multiple of 16.
+        w=$(( (w / 16) * 16 ))
+        h=$(( (h / 16) * 16 ))
+        
         # Get Orientation
         local orientation
         orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys input 2>/dev/null | grep SurfaceOrientation | head -1 | awk '{print $2}')
@@ -142,22 +146,19 @@ get_client_display_metrics() {
 
     # Get Refresh Rate
     local refresh_rate
+    refresh_rate=$("${ADB_BIN:-adb}" -s "$ADB_SERIAL" shell dumpsys display | grep -iE 'refresh|fps' | grep -oE '[0-9]+\.[0-9]+' | head -n 1)
     
     if [[ -n "${GUI_FRAMERATE:-}" ]] && [[ "${GUI_FRAMERATE}" -gt 0 ]]; then
         TARGET_REFRESH="${GUI_FRAMERATE}"
-        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, forced ${TARGET_REFRESH}Hz)"
+        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${refresh_rate:-Unknown}Hz)"
+        log_info "Using manual refresh rate: ${TARGET_REFRESH}Hz"
+    elif [[ -n "$refresh_rate" ]]; then
+        TARGET_REFRESH=$(printf "%.0f" "$refresh_rate")
+        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${TARGET_REFRESH}Hz)"
     else
-        refresh_rate=$("${ADB_BIN:-adb}" -s "$ADB_SERIAL" shell dumpsys display | grep -iE 'refresh|fps' | grep -oE '[0-9]+\.[0-9]+' | head -n 1)
-
-        if [[ -n "$refresh_rate" ]]; then
-            # Round to integer
-            TARGET_REFRESH=$(printf "%.0f" "$refresh_rate")
-            log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${TARGET_REFRESH}Hz)"
-        else
-            log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation})"
-            log_warn "Could not fetch device refresh rate, falling back to 120Hz"
-            TARGET_REFRESH=120
-        fi
+        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation})"
+        log_warn "Could not fetch device refresh rate, falling back to 120Hz"
+        TARGET_REFRESH=120
     fi
     
     return 0

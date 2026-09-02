@@ -84,7 +84,7 @@ check_deps() {
         vaapi)
             required_elements=(
                 "pipewiresrc:gstreamer1.0-pipewire"
-                "vaapih264enc:gstreamer1.0-vaapi (or gstreamer-vaapi on Arch)"
+                "vah264enc:gst-plugin-va (or gstreamer-vaapi on older distros)"
                 "tcpclientsink:gstreamer1.0-plugins-good (net)"
                 "h264parse:gstreamer1.0-plugins-bad"
                 "queue:gstreamer1.0-plugins-base"

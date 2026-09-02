@@ -102,17 +102,15 @@ teardown() {
     # 1. Stop GStreamer pipeline
     stop_pipeline "${PIPELINE_PID:-}"
 
-    # 2. Kill the headless Mutter screencast script if it's running
-    if [[ -n "${MUTTER_SCREENCAST_PID:-}" ]]; then
-        kill "$MUTTER_SCREENCAST_PID" 2>/dev/null || true
-    fi
-    pkill -f "mutter_create_virtual.py" 2>/dev/null || true
+    # 2. Disable virtual monitor using placement manager
+    python3 "${SCRIPT_DIR}/lib/placement_manager.py" disable 2>/dev/null || true
     
-    # Kill control server
+    # Kill control server and screencast
     if [[ -n "${CONTROL_SERVER_PID:-}" ]]; then
         kill "$CONTROL_SERVER_PID" 2>/dev/null || true
     fi
     pkill -f "lib/control_server.py" 2>/dev/null || true
+    pkill -f "lib/mutter_record_virtual.py" 2>/dev/null || true
 
     # Kill orientation watcher
     if [[ -n "${ORIENTATION_WATCHER_PID:-}" ]]; then
@@ -129,17 +127,15 @@ teardown() {
 setup_traps
 
 restart_pipeline() {
+    # Immediately disable all traps and set +e so nothing can trigger teardown
+    # while we're in the middle of restarting. This MUST come before stop_pipeline.
+    set +e
+    trap '' EXIT INT TERM SIGUSR1
+    _NS_TEARDOWN_CALLED=1
     log_info "Settings updated via control channel. Restarting..."
     stop_pipeline "${PIPELINE_PID:-}"
-    if [[ -n "${MUTTER_SCREENCAST_PID:-}" ]]; then
-        kill "$MUTTER_SCREENCAST_PID" 2>/dev/null || true
-    fi
-    if [[ -n "${CONTROL_SERVER_PID:-}" ]]; then
-        kill "$CONTROL_SERVER_PID" 2>/dev/null || true
-    fi
-    if [[ -n "${ORIENTATION_WATCHER_PID:-}" ]]; then
-        kill "$ORIENTATION_WATCHER_PID" 2>/dev/null || true
-    fi
+    kill "${CONTROL_SERVER_PID:-}" 2>/dev/null || true
+    kill "${ORIENTATION_WATCHER_PID:-}" 2>/dev/null || true
     exec "$0" "$@"
 }
 trap restart_pipeline SIGUSR1
@@ -218,17 +214,17 @@ setup_adb_forward || exit 1
 log_step "Step 3/5 — Virtual display"
 verify_virtual_display || exit 1
 
-# -----------------------------------------------------------------------------
-# STEP 4 — Discover PipeWire node ID for the virtual display
-# -----------------------------------------------------------------------------
-log_step "Step 4/5 — PipeWire node"
-get_pipewire_node_id || exit 1
-
 # Apply configured display placement
 if [[ -n "${PLACEMENT:-}" ]]; then
     log_info "Applying virtual monitor placement: ${PLACEMENT}"
     python3 "${SCRIPT_DIR}/lib/placement_manager.py" "${PLACEMENT}" || log_warn "Failed to apply display placement"
 fi
+
+# -----------------------------------------------------------------------------
+# STEP 4 — Discover PipeWire node ID for the virtual display
+# -----------------------------------------------------------------------------
+log_step "Step 4/5 — PipeWire node"
+get_pipewire_node_id || exit 1
 
 display_info
 

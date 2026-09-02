@@ -150,7 +150,7 @@ gst_elements=(
     "queue:Stream queue"
     "videoconvert:Video format converter"
     "vulkanupload:Vulkan uploader"
-    "vaapih264enc:VAAPI H.264 encoder"
+    "vah264enc:VAAPI H.264 encoder"
 )
 
 MISSING_GST=false
@@ -235,23 +235,36 @@ warn "Settings → About Phone → tap Build Number ×7 → Developer Options �
 
 # ── Section 5: Virtual display check ─────────────────────────────────────────
 step "GNOME virtual display"
-if [[ -f "${SYSTEMD_OVERRIDE}" ]]; then
-    ok "systemd override found: ${SYSTEMD_OVERRIDE}"
+
+SYSTEMD_OVERRIDE="${HOME}/.config/systemd/user/org.gnome.Shell@user.service.d/override.conf"
+
+if grep -q "^ExecStart=" "${SYSTEMD_OVERRIDE}" 2>/dev/null; then
+    ok "systemd override found and active: ${SYSTEMD_OVERRIDE}"
     echo "  Contents:"
     cat "${SYSTEMD_OVERRIDE}" | sed 's/^/    /'
 else
-    warn "No GNOME Shell systemd override found at:"
-    warn "  ${SYSTEMD_OVERRIDE}"
+    if [[ -f "${SYSTEMD_OVERRIDE}" ]]; then
+        warn "systemd override exists but appears inactive (commented out):"
+        warn "  ${SYSTEMD_OVERRIDE}"
+    else
+        warn "No GNOME Shell systemd override found at:"
+        warn "  ${SYSTEMD_OVERRIDE}"
+    fi
     warn ""
-    warn "Create it to add a persistent virtual monitor:"
-    warn "  mkdir -p \$(dirname '${SYSTEMD_OVERRIDE}')"
-    warn "  cat > '${SYSTEMD_OVERRIDE}' << 'EOF'"
-    warn "  [Service]"
-    warn "  ExecStart="
-    warn "  ExecStart=/usr/bin/gnome-shell --mode=user --virtual-monitor 800x1340"
-    warn "  EOF"
-    warn "  systemctl --user daemon-reload"
-    warn "  Then log out and back in."
+    if [[ "${CHECK_ONLY}" != "true" ]]; then
+        step "Creating virtual monitor systemd override"
+        mkdir -p "$(dirname "${SYSTEMD_OVERRIDE}")"
+        cat > "${SYSTEMD_OVERRIDE}" << 'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/gnome-shell --mode=user --virtual-monitor 800x1340
+EOF
+        systemctl --user daemon-reload
+        ok "Created ${SYSTEMD_OVERRIDE}"
+        warn "CRITICAL: You MUST log out of your desktop and log back in to apply this change!"
+    else
+        warn "Run ./install.sh without --check to create the virtual monitor override."
+    fi
 fi
 
 # Check if virtual monitor is currently live

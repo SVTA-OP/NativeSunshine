@@ -4,7 +4,7 @@ import dbus
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 placement_manager.py [left|right|above|below]")
+        print("Usage: python3 placement_manager.py [left|right|above|below|disable]")
         sys.exit(1)
         
     placement = sys.argv[1].lower()
@@ -25,24 +25,83 @@ def main():
     # find primary monitor to get anchor coords
     primary_lm = None
     virtual_lm = None
+    virtual_connector = None
     
+    # First find the virtual monitor in the raw physical monitors list
+    for m in monitors:
+        connector = m[0][0]
+        if "Virtual" in connector or "HEADLESS" in connector or "Meta" in connector:
+            virtual_connector = connector
+            break
+
+    if not virtual_connector:
+        print("Virtual monitor not found in monitors.")
+        sys.exit(1)
+
     for lm in logical_monitors:
         x, y, scale, transform, primary, linked_monitors, props = lm
-        is_virtual = False
         for m in linked_monitors:
-            connector = m[0]
-            if "Virtual" in connector or "HEADLESS" in connector or "Meta" in connector:
-                is_virtual = True
+            if m[0] == virtual_connector:
+                virtual_lm = lm
                 break
-        
-        if is_virtual:
-            virtual_lm = lm
-        elif primary:
+        if primary:
             primary_lm = lm
 
+    def get_active_mode_id_and_size(connector):
+        for m in monitors:
+            m_info, modes, m_props = m
+            if m_info[0] == connector:
+                for mode in modes:
+                    if 'is-current' in mode[6] and mode[6]['is-current']:
+                        return mode[0], mode[1], mode[2]
+                for mode in modes:
+                    if 'is-preferred' in mode[6] and mode[6]['is-preferred']:
+                        return mode[0], mode[1], mode[2]
+                if modes:
+                    return modes[0][0], modes[0][1], modes[0][2]
+        return "", 1920, 1080
+
     if not virtual_lm:
-        print("Virtual monitor not found.")
-        sys.exit(1)
+        if placement == "disable":
+            print("Virtual monitor is already disabled.")
+            sys.exit(0)
+            
+        # The virtual monitor exists but is disabled (not in logical layout).
+        # We append a default logical monitor for it so it gets enabled.
+        virtual_lm = (0, 0, 1.0, 0, False, [(virtual_connector, "", {})], {})
+        # Note: logical_monitors is a dbus.Array, we can just append to a list copy or directly use it
+        logical_monitors = list(logical_monitors)
+        logical_monitors.append(virtual_lm)
+    elif placement == "disable":
+        # Remove it from logical monitors to disable it
+        logical_monitors = [lm for lm in logical_monitors if lm != virtual_lm]
+        
+        # We must shift the remaining monitors so the bounding box starts at (0,0)
+        if logical_monitors:
+            min_x = min([lm[0] for lm in logical_monitors])
+            min_y = min([lm[1] for lm in logical_monitors])
+        else:
+            min_x, min_y = 0, 0
+            
+        new_logical_monitors = []
+        for lx, ly, lscale, ltransform, lprimary, llinked, lprops in logical_monitors:
+            new_logical_monitors.append((dbus.Int32(lx - min_x), dbus.Int32(ly - min_y), lscale, ltransform, lprimary, llinked))
+            
+        try:
+            formatted_logical_monitors = []
+            for x, y, scale, trans, prim, linked in new_logical_monitors:
+                formatted_linked = []
+                for link in linked:
+                    connector = link[0]
+                    mode_id, _, _ = get_active_mode_id_and_size(connector)
+                    formatted_linked.append((dbus.String(connector), dbus.String(mode_id), dbus.Dictionary({}, signature='sv')))
+                formatted_logical_monitors.append((dbus.Int32(x), dbus.Int32(y), dbus.Double(scale), dbus.UInt32(trans), dbus.Boolean(prim), formatted_linked))
+    
+            iface.ApplyMonitorsConfig(serial, 1, formatted_logical_monitors, properties)
+            print("Virtual monitor disabled.")
+        except Exception as e:
+            print(f"Failed to disable monitor: {e}")
+        sys.exit(0)
 
     if not primary_lm:
         # fallback to the first non-virtual monitor
@@ -69,20 +128,6 @@ def main():
     # A simpler way is to find the bounding box of the primary monitor.
     # For now, let's look up the mode of the linked monitor.
     
-    def get_active_mode_id_and_size(connector):
-        for m in monitors:
-            m_info, modes, m_props = m
-            if m_info[0] == connector:
-                for mode in modes:
-                    if 'is-current' in mode[6] and mode[6]['is-current']:
-                        return mode[0], mode[1], mode[2]
-                for mode in modes:
-                    if 'is-preferred' in mode[6] and mode[6]['is-preferred']:
-                        return mode[0], mode[1], mode[2]
-                if modes:
-                    return modes[0][0], modes[0][1], modes[0][2]
-        return "", 1920, 1080
-
     p_mode_id, p_width_raw, p_height_raw = get_active_mode_id_and_size(plinked[0][0])
     p_width = int(p_width_raw / pscale)
     p_height = int(p_height_raw / pscale)

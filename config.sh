@@ -8,8 +8,8 @@
 # Virtual Display
 # Target resolution and refresh rate for the virtual monitor.
 # -----------------------------------------------------------------------------
-TARGET_WIDTH=800
-TARGET_HEIGHT=1340
+TARGET_WIDTH=1200
+TARGET_HEIGHT=1920
 TARGET_REFRESH=120
 
 # -----------------------------------------------------------------------------
