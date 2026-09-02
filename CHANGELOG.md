@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.0.0] - 2026-09-02
 
 ### Added
 - **GUI Desktop Shortcut**: `install.sh` now automatically creates and installs a Linux `.desktop` application menu shortcut for the NativeSunshine GUI.
