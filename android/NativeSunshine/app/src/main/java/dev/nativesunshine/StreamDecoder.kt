@@ -33,8 +33,9 @@ private val START_CODE_3 = byteArrayOf(0x00, 0x00, 0x01)
  *
  * Threading:
  *   - feedData() is called from SocketReader's read thread
- *   - Internally queues data into MediaCodec input buffers via queueThread
- *   - MediaCodec output is configured for surface rendering (async-to-surface)
+ *   - MediaCodec operates in asynchronous event-driven mode (MediaCodec.Callback)
+ *   - Hardware input buffers are fed on-demand with zero thread polling
+ *   - Decoded output is released immediately to Surface on hardware callback
  *
  * @param onFirstFrame  Callback fired on the first successfully rendered frame
  * @param onError       Callback fired on a non-recoverable codec error
