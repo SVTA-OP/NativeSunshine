@@ -67,11 +67,11 @@ pipewiresrc
   !
   videoscale method=0
   !
-  videorate max-rate=${fps} drop-only=true skip-to-first=true
+  videorate
   !
   video/x-raw, format=NV12, width=${w}, height=${h}, framerate=${fps}/1
   !
-  queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
+  queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0
   !
   vulkanupload
   !
@@ -118,11 +118,11 @@ pipewiresrc
   !
   videoscale method=0
   !
-  videorate max-rate=${fps} drop-only=true skip-to-first=true
+  videorate
   !
   video/x-raw, width=${w}, height=${h}, framerate=${fps}/1
   !
-  queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
+  queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0
   !
   nvh264enc
     bitrate=${bitrate}
@@ -168,11 +168,11 @@ pipewiresrc
   !
   videoscale method=0
   !
-  videorate max-rate=${fps} drop-only=true skip-to-first=true
+  videorate
   !
   video/x-raw, format=I420, width=${w}, height=${h}, framerate=${fps}/1
   !
-  queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
+  queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0
   !
   x264enc
     bitrate=${bitrate}
@@ -219,11 +219,11 @@ pipewiresrc
   !
   vapostproc
   !
-  videorate max-rate=${fps} drop-only=true skip-to-first=true
+  videorate
   !
   video/x-raw, width=${w}, height=${h}, framerate=${fps}/1
   !
-  queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
+  queue max-size-buffers=2 leaky=downstream max-size-bytes=0 max-size-time=0
   !
   vah264enc
     bitrate=${bitrate}

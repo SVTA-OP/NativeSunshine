@@ -55,9 +55,10 @@ class StreamDecoder(
 
     private val bufferLock = Any()
 
-    // Queue of byte arrays from SocketReader when codec input buffers are busy
-    // Capped to 2 frames to strictly prevent buffer bloat (Scrcpy / Moonlight pattern)
-    private val dataQueue = ArrayBlockingQueue<ByteArray>(2)
+    // Queue of byte arrays from SocketReader when codec input buffers are busy.
+    // Capacity 8 buffers absorbs USB packet clustering without dropping P-frames
+    // while keeping max buffering bounded to ~130ms in catastrophic congestion.
+    private val dataQueue = ArrayBlockingQueue<ByteArray>(8)
     private val availableInputBuffers = ConcurrentLinkedQueue<Int>()
 
     // Performance tracking
@@ -73,7 +74,7 @@ class StreamDecoder(
 
     private val targetFps = refreshRate.coerceAtMost(60f)
     private var presentationUs = 0L
-    private val frameDurationUs = 1_000L
+    private val frameDurationUs = (1_000_000L / targetFps).toLong()
 
     // NAL unit framing buffers
     private val frameBuf = ByteArray(2 * 1024 * 1024) // 2MB max frame
@@ -189,8 +190,8 @@ class StreamDecoder(
                     synchronized(bufferLock) {
                         idx = availableInputBuffers.poll()
                         if (idx == null) {
-                            while (!dataQueue.offer(frame)) {
-                                dataQueue.poll()
+                            if (!dataQueue.offer(frame)) {
+                                Log.w(TAG, "Input queue full (8 frames buffered), dropping frame")
                                 framesDroppedCongested++
                             }
                             handled = true
@@ -203,8 +204,8 @@ class StreamDecoder(
                 }
                 if (!handled) {
                     synchronized(bufferLock) {
-                        while (!dataQueue.offer(frame)) {
-                            dataQueue.poll()
+                        if (!dataQueue.offer(frame)) {
+                            Log.w(TAG, "Input queue full (8 frames buffered), dropping frame")
                             framesDroppedCongested++
                         }
                     }
@@ -510,30 +511,19 @@ class StreamDecoder(
             inputBuf.clear()
             inputBuf.put(chunk)
 
-            // Determine if this NAL unit is SPS (7) or PPS (8)
-            var flags = 0
-            var i = 0
-            while (i <= chunk.size - 4) {
-                if (chunk[i] == 0.toByte() && chunk[i+1] == 0.toByte() && chunk[i+2] == 1.toByte()) {
-                    val nalType = chunk[i+3].toInt() and 0x1F
-                    if (nalType == 7 || nalType == 8) {
-                        flags = MediaCodec.BUFFER_FLAG_CODEC_CONFIG
-                        break
-                    }
-                }
-                i++
-            }
-
+            // In Annex-B byte-stream mode, inline SPS/PPS parameter sets must NOT be
+            // marked with BUFFER_FLAG_CODEC_CONFIG once the codec is running. Marking
+            // them causes MediaTek Codec2 to treat it as a stream reconfiguration,
+            // flushing in-flight work and discarding frames. MediaCodec decodes inline
+            // Annex-B NAL units directly with flags = 0.
             val pts = presentationUs
-            if (flags == 0) {
-                if (latencyMap.size > 120) {
-                    latencyMap.clear()
-                }
-                latencyMap[pts] = System.nanoTime()
-                presentationUs += frameDurationUs
+            if (latencyMap.size > 120) {
+                latencyMap.clear()
             }
+            latencyMap[pts] = System.nanoTime()
+            presentationUs += frameDurationUs
 
-            c.queueInputBuffer(idx, 0, chunk.size, pts, flags)
+            c.queueInputBuffer(idx, 0, chunk.size, pts, 0 /* flags */)
         } catch (e: Exception) {
             Log.w(TAG, "writeChunkToInputBuffer error: ${e.message}")
         }
@@ -549,7 +539,12 @@ class StreamDecoder(
 
         framesDequeued++
         val isSurfaceValid = pendingSurface?.isValid == true
-        val shouldRender = isSurfaceValid && isRunning.get()
+        // Dynamic backpressure: if network frames are piling up in dataQueue (> 1),
+        // skip rendering this older frame to prevent SurfaceFlinger buffer bloat and
+        // vsync cascade latency. MediaCodec still decodes it internally so H.264 P-frame
+        // reference integrity is 100% maintained.
+        val isCongested = dataQueue.size > 1
+        val shouldRender = isSurfaceValid && isRunning.get() && !isCongested
 
         try {
             c.releaseOutputBuffer(outIdx, shouldRender)
@@ -558,6 +553,8 @@ class StreamDecoder(
                 if (!firstFrameFired.getAndSet(true)) {
                     onFirstFrame()
                 }
+            } else if (isCongested) {
+                framesDroppedPacing++
             }
         } catch (e: Exception) {
             Log.w(TAG, "releaseOutputBuffer error: ${e.message}")
