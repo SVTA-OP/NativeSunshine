@@ -12,7 +12,7 @@
         <EditTextPreference
             app:key="host_fps"
             app:title="Target FPS"
-            app:summary="FPS for host pipeline (Default: 60)"
+            app:summary="FPS for host pipeline (Max: 60)"
             app:defaultValue="60"
             app:useSimpleSummaryProvider="true" />
         <EditTextPreference

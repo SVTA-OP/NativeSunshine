@@ -84,7 +84,7 @@ def main():
                             updated = True
 
                     if "fps" in msg:
-                        new_val = int(msg["fps"])
+                        new_val = min(int(msg["fps"]), 60)
                         if config.get("framerate") != new_val:
                             print(f"Framerate changed: {config.get('framerate')} → {new_val}")
                             config["framerate"] = new_val

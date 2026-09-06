@@ -9,6 +9,8 @@ local.properties
 # Gradle
 **/.gradle/
 **/build/
+.kotlin/
+**/.kotlin/
 
 # Python
 __pycache__/

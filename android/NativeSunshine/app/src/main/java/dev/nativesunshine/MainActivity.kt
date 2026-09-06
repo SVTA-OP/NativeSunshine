@@ -7,6 +7,7 @@ import android.content.ServiceConnection
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -73,6 +74,24 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         // Keep screen on
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // Lock screen refresh rate to 60Hz to prevent 120Hz buffer pool exhaustion and freezing
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val params = window.attributes
+            params.preferredRefreshRate = 60.0f
+            val displayObj = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay
+            }
+            displayObj?.supportedModes?.find { mode ->
+                Math.abs(mode.refreshRate - 60.0f) < 1.0f
+            }?.let { mode60 ->
+                params.preferredDisplayModeId = mode60.modeId
+            }
+            window.attributes = params
+        }
+
         setContentView(R.layout.activity_main)
 
         surfaceView = findViewById(R.id.surface_view)
@@ -116,6 +135,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     // ── SurfaceHolder.Callback ─────────────────────────────────────────────────
     override fun surfaceCreated(holder: SurfaceHolder) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            holder.surface.setFrameRate(60.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+        }
         // Hand the Surface to the service so the decoder can render into it
         receiverService?.setSurface(holder.surface)
     }

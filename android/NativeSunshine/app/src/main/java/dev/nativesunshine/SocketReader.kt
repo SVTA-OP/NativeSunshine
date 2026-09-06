@@ -88,6 +88,7 @@ class SocketReader(
 
                 // Optimize socket for low-latency streaming:
                 client.tcpNoDelay = true           // Disable Nagle (send immediately)
+                client.receiveBufferSize = 32768   // Prevent kernel TCP socket buffer bloat
                 client.setPerformancePreferences(0, 1, 0)  // prioritize latency
 
                 onConnected()

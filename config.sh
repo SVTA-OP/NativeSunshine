@@ -14,7 +14,7 @@ TARGET_HEIGHT=1340
 # `adb shell dumpsys display` — no 120Hz mode exists on this hardware).
 # adb.sh overrides this at runtime anyway, but keep the resting default
 # honest so a fresh checkout doesn't start by assuming 120.
-TARGET_REFRESH=120
+TARGET_REFRESH=60
 
 # -----------------------------------------------------------------------------
 # Encoding
@@ -26,7 +26,7 @@ TARGET_REFRESH=120
 # -----------------------------------------------------------------------------
 ENCODER=vulkan
 STREAM_BITRATE=8000
-KEYFRAME_INTERVAL=60
+KEYFRAME_INTERVAL=180
 RESOLUTION_SCALE=100
 PLACEMENT="right"
 
@@ -36,7 +36,7 @@ if [[ -f "$GUI_CONFIG" ]]; then
     ENCODER=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('encoder', 'vulkan'))" "$GUI_CONFIG")
     STREAM_BITRATE=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('bitrate', 8000))" "$GUI_CONFIG")
     GUI_FRAMERATE=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('framerate', 0))" "$GUI_CONFIG")
-    KEYFRAME_INTERVAL=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('keyframe_interval', 60))" "$GUI_CONFIG")
+    KEYFRAME_INTERVAL=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('keyframe_interval', 180))" "$GUI_CONFIG")
     RESOLUTION_SCALE=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('resolution_scale', 100))" "$GUI_CONFIG")
     PLACEMENT=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('placement', 'right'))" "$GUI_CONFIG")
 fi

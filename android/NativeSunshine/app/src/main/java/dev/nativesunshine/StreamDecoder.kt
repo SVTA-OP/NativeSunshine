@@ -8,7 +8,8 @@ import android.os.Build
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -51,34 +52,31 @@ class StreamDecoder(
     private var pendingSurface: Surface? = null
     private var codecConfigured = false
 
-    // Render pacing: the A7 Lite panel is hardware-limited to 60Hz (confirmed
-    // via dumpsys — no 120Hz mode exists on this device), but the host may
-    // capture/encode at a higher rate for smoother motion sampling. We pace
-    // *output* to wall-clock time rather than decimating by a fixed frame
-    // count, so it self-adapts to whatever rate actually arrives instead of
-    // assuming a specific capture fps. This is independent of the reactive
-    // backpressure drop below, which remains purely a safety valve for input
-    // buffer starvation, not a smoothing mechanism.
-    private val renderIntervalNs = (1_000_000_000L / refreshRate).toLong()
-    private var lastRenderNs = 0L
+    private val bufferLock = Any()
 
-    // Queue of byte arrays from SocketReader → queueThread → MediaCodec
-    private val dataQueue = LinkedBlockingQueue<ByteArray>(256)
+    // Queue of byte arrays from SocketReader when codec input buffers are busy
+    // Capped to 2 frames to strictly prevent buffer bloat (Scrcpy / Moonlight pattern)
+    private val dataQueue = ArrayBlockingQueue<ByteArray>(2)
+    private val availableInputBuffers = ConcurrentLinkedQueue<Int>()
 
     // Performance tracking
+    private var framesDequeued = 0
     private var framesRendered = 0
+    private var framesDroppedPacing = 0
+    private var framesDroppedCongested = 0
     private var bytesReceived = 0L
     private var lastStatsTime = System.currentTimeMillis()
     private val latencyMap = java.util.concurrent.ConcurrentHashMap<Long, Long>()
     private var totalLatencyNs = 0L
     private var latencyCount = 0
-    
+
+    private val targetFps = refreshRate.coerceAtMost(60f)
+    private var presentationUs = 0L
+    private val frameDurationUs = 1_000L
+
     // NAL unit framing buffers
     private val frameBuf = ByteArray(2 * 1024 * 1024) // 2MB max frame
     private var frameBufLen = 0
-
-    private var queueThread: Thread? = null
-    private var outputThread: Thread? = null
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -99,12 +97,17 @@ class StreamDecoder(
         }
 
         firstFrameFired.set(false)
-        dataQueue.clear()
+        synchronized(bufferLock) {
+            dataQueue.clear()
+            availableInputBuffers.clear()
+        }
+        latencyMap.clear()
         frameBufLen = 0
+        presentationUs = 0L
         pendingSurface = surface
         codecConfigured = false
 
-        Log.i(TAG, "Decoder waiting for SPS to configure codec")
+        Log.i(TAG, "Decoder waiting for SPS to configure async codec (capped to ${targetFps.toInt()} FPS)")
     }
 
     /** Feed raw H.264 byte-stream data. Thread-safe; called from SocketReader. */
@@ -163,8 +166,7 @@ class StreamDecoder(
                             try {
                                 setupCodec(surface, dims.first, dims.second)
                                 codecConfigured = true
-                                startQueueThread()
-                                Log.i(TAG, "Decoder started")
+                                Log.i(TAG, "Async decoder started")
                             } catch (e: Exception) {
                                 Log.e(TAG, "Codec setup failed: ${e.message}", e)
                                 isRunning.set(false)
@@ -179,10 +181,32 @@ class StreamDecoder(
             }
 
             if (codecConfigured) {
-                try {
-                    dataQueue.put(frame) // Blocks applying backpressure
-                } catch (e: InterruptedException) {
-                    return
+                val c = codec
+                var handled = false
+                if (c != null && isRunning.get()) {
+                    var idx: Int? = null
+                    synchronized(bufferLock) {
+                        idx = availableInputBuffers.poll()
+                        if (idx == null) {
+                            while (!dataQueue.offer(frame)) {
+                                dataQueue.poll()
+                                framesDroppedCongested++
+                            }
+                            handled = true
+                        }
+                    }
+                    if (idx != null) {
+                        writeChunkToInputBuffer(c, idx!!, frame)
+                        handled = true
+                    }
+                }
+                if (!handled) {
+                    synchronized(bufferLock) {
+                        while (!dataQueue.offer(frame)) {
+                            dataQueue.poll()
+                            framesDroppedCongested++
+                        }
+                    }
                 }
             }
             
@@ -201,8 +225,12 @@ class StreamDecoder(
         if (now - lastStatsTime >= 1000) {
             val mbps = (bytesReceived * 8f) / 1_000_000f
             val avgLatencyMs = if (latencyCount > 0) (totalLatencyNs / latencyCount) / 1_000_000L else 0L
+            Log.i(TAG, "Stats: rendered=$framesRendered, dequeued=$framesDequeued, droppedPacing=$framesDroppedPacing, droppedCongested=$framesDroppedCongested, dataQ=${dataQueue.size}, ${"%.2f".format(mbps)} Mbps, ${avgLatencyMs}ms latency")
             onStatsUpdate?.invoke(framesRendered, mbps, avgLatencyMs)
+            framesDequeued = 0
             framesRendered = 0
+            framesDroppedPacing = 0
+            framesDroppedCongested = 0
             bytesReceived = 0L
             totalLatencyNs = 0L
             latencyCount = 0
@@ -214,9 +242,11 @@ class StreamDecoder(
     fun stop() {
         if (!isRunning.getAndSet(false)) return
         Log.i(TAG, "Stopping decoder")
-        dataQueue.clear()
-        queueThread?.interrupt()
-        queueThread = null
+        synchronized(bufferLock) {
+            dataQueue.clear()
+            availableInputBuffers.clear()
+        }
+        latencyMap.clear()
         codecConfigured = false
         pendingSurface = null
         releaseCodec()
@@ -224,7 +254,11 @@ class StreamDecoder(
 
     /** Update the render surface (called when SurfaceView changes). */
     fun updateSurface(surface: Surface?) {
-        if (surface == null || !surface.isValid) return
+        pendingSurface = surface
+        if (surface == null || !surface.isValid) {
+            Log.d(TAG, "Output surface cleared or invalid")
+            return
+        }
         try {
             // MediaCodec.setOutputSurface() can swap the surface without
             // stopping the codec — available on API 23+.
@@ -346,6 +380,11 @@ class StreamDecoder(
             Log.w(TAG, "Could not query decoder frame rate capability: ${e.message}")
         }
 
+        // Find a hardware H.264 decoder first to inspect capabilities/quirks
+        val decoderName = findH264Decoder()
+        Log.i(TAG, "Using decoder: $decoderName")
+        val isMtk = decoderName.contains("mtk", ignoreCase = true)
+
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_AVC,
             streamWidth,
@@ -354,20 +393,27 @@ class StreamDecoder(
             // Real-time priority — reduces decode latency
             setInteger(MediaFormat.KEY_PRIORITY, 0)
 
+            // Request high operating rate so the VPU clocks up for real-time 60fps decoding
+            try {
+                setInteger(MediaFormat.KEY_OPERATING_RATE, 120)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set KEY_OPERATING_RATE: ${e.message}")
+            }
+
+            // Zero-reorder hints (no B-frames in stream, output immediately)
+            try {
+                setInteger("max-num-reorder-frames", 0)
+                setInteger("output-reorder-depth", 0)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set reorder depth: ${e.message}")
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 try {
-                    val info = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-                    val name = info.name
-                    info.release()
-                    val codecInfo = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { it.name == name }
-                    val caps = codecInfo?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
-                    if (caps != null && caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)) {
-                        setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-                        setInteger(MediaFormat.KEY_OPERATING_RATE, 120) // Give headroom without overwhelming Mediatek decoders
-                        Log.i(TAG, "Low latency mode enabled natively")
-                    }
+                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                    Log.i(TAG, "Low latency mode enabled natively for $decoderName")
                 } catch (e: Exception) {
-                    Log.w(TAG, "Failed to check low latency support: ${e.message}")
+                    Log.w(TAG, "Failed to set KEY_LOW_LATENCY: ${e.message}")
                 }
             }
 
@@ -375,46 +421,67 @@ class StreamDecoder(
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
 
             // Frame rate hint for the decoder
-            setInteger(MediaFormat.KEY_FRAME_RATE, refreshRate.toInt())
+            setInteger(MediaFormat.KEY_FRAME_RATE, targetFps.toInt())
 
             // COLOR_FormatSurface = decode directly to Surface (zero-copy)
             setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         }
 
-        // Find a hardware H.264 decoder
-        val decoderName = findH264Decoder()
-        Log.i(TAG, "Using decoder: $decoderName")
-
         codec = MediaCodec.createByCodecName(decoderName).also { c ->
+            c.setCallback(object : MediaCodec.Callback() {
+                override fun onInputBufferAvailable(mc: MediaCodec, inputIndex: Int) {
+                    if (!isRunning.get()) return
+                    onInputBufferReady(mc, inputIndex)
+                }
+
+                override fun onOutputBufferAvailable(mc: MediaCodec, outputIndex: Int, info: MediaCodec.BufferInfo) {
+                    if (!isRunning.get()) return
+                    handleDecodedOutput(mc, outputIndex, info)
+                }
+
+                override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {
+                    Log.e(TAG, "MediaCodec callback error: ${e.message}", e)
+                    if (isRunning.get()) {
+                        onError("Decoder callback error: ${e.message}")
+                    }
+                }
+
+                override fun onOutputFormatChanged(mc: MediaCodec, format: MediaFormat) {
+                    Log.d(TAG, "Output format changed: $format")
+                }
+            })
             c.configure(format, surface, null, 0 /* decode */)
             c.start()
         }
     }
 
     private fun findH264Decoder(): String {
-        // Prefer hardware decoders; MediaCodec.createDecoderByType picks the
-        // highest-priority one automatically, which is usually HW on modern devices.
-        val info = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        val name = info.name
-        info.release()
-
-        // Validate it's a hardware decoder (name usually contains 'omx' or 'c2.android' is SW)
-        if (name.contains("google") || name.contains("sw", ignoreCase = true)) {
-            Log.w(TAG, "Decoder '$name' may be software — latency will be higher")
+        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        for (info in codecList.codecInfos) {
+            if (!info.isEncoder) {
+                val types = info.supportedTypes
+                if (types.contains(MediaFormat.MIMETYPE_VIDEO_AVC)) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        if (info.isHardwareAccelerated) {
+                            return info.name
+                        }
+                    } else {
+                        // Fallback check for older devices
+                        if (!info.name.contains("google", ignoreCase = true) && !info.name.contains("sw", ignoreCase = true)) {
+                            return info.name
+                        }
+                    }
+                }
+            }
         }
-        return name
-    }
-
-    // ── Input queue thread ─────────────────────────────────────────────────────
-
-    private fun startQueueThread() {
-        queueThread = Thread({
-            runQueueLoop()
-        }, "NS-codec-input").apply {
-            isDaemon = true
-            start()
-        }
+        
+        // Fallback to default if no hardware decoder explicitly found
+        val defaultInfo = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        val defaultName = defaultInfo.name
+        defaultInfo.release()
+        Log.w(TAG, "Hardware decoder not explicitly found, falling back to default: $defaultName")
+        return defaultName
     }
 
     private fun getStartCodeLen(buf: ByteArray, offset: Int, limit: Int): Int {
@@ -426,127 +493,73 @@ class StreamDecoder(
         return 0
     }
 
-    private fun runQueueLoop() {
-        val c = codec ?: return
-        var presentationUs = 0L
-        // This no longer drives render timing — actual pacing happens in
-        // drainOutput() against wall-clock time, since the source frame rate
-        // can vary (60Hz decode-only, or a higher capture rate decimated
-        // down). This is just a monotonic key for latencyMap bookkeeping.
-        val frameDurationUs = 1_000L
+    private fun onInputBufferReady(mc: MediaCodec, inputIndex: Int) {
+        val chunk = synchronized(bufferLock) {
+            dataQueue.poll()
+        } ?: run {
+            availableInputBuffers.offer(inputIndex)
+            return
+        }
+        writeChunkToInputBuffer(mc, inputIndex, chunk)
+    }
 
+    private fun writeChunkToInputBuffer(c: MediaCodec, idx: Int, chunk: ByteArray) {
         try {
-            while (isRunning.get()) {
-                val chunk = dataQueue.poll(5, TimeUnit.MILLISECONDS)
-                if (chunk == null) {
-                    drainOutput(c, false)
-                    continue
-                }
+            val inputBuf = c.getInputBuffer(idx) ?: return
+            inputBuf.clear()
+            inputBuf.put(chunk)
 
-                // Determine if this NAL unit is SPS (7) or PPS (8)
-                var flags = 0
-                var i = 0
-                while (i <= chunk.size - 4) {
-                    if (chunk[i] == 0.toByte() && chunk[i+1] == 0.toByte() && chunk[i+2] == 1.toByte()) {
-                        val nalType = chunk[i+3].toInt() and 0x1F
-                        if (nalType == 7 || nalType == 8) {
-                            flags = MediaCodec.BUFFER_FLAG_CODEC_CONFIG
-                            break
-                        }
-                    }
-                    i++
-                }
-
-                var idx = -1
-                while (isRunning.get()) {
-                    idx = c.dequeueInputBuffer(1000L)
-                    if (idx >= 0) break
-                    // If input buffer is full, drain output to free up buffers.
-                    drainOutput(c, forceDrop = false)
-                }
-
-                if (idx >= 0) {
-                    val inputBuf = c.getInputBuffer(idx)
-                    if (inputBuf != null) {
-                        inputBuf.clear()
-                        inputBuf.put(chunk)
-                        
-                        if (flags == 0) latencyMap[presentationUs] = System.nanoTime()
-                        c.queueInputBuffer(idx, 0, chunk.size, presentationUs, flags)
-                        
-                        // Only advance presentation time for actual payload frames
-                        if (flags == 0) presentationUs += frameDurationUs
+            // Determine if this NAL unit is SPS (7) or PPS (8)
+            var flags = 0
+            var i = 0
+            while (i <= chunk.size - 4) {
+                if (chunk[i] == 0.toByte() && chunk[i+1] == 0.toByte() && chunk[i+2] == 1.toByte()) {
+                    val nalType = chunk[i+3].toInt() and 0x1F
+                    if (nalType == 7 || nalType == 8) {
+                        flags = MediaCodec.BUFFER_FLAG_CODEC_CONFIG
+                        break
                     }
                 }
+                i++
+            }
 
-                // Drain output — render any available decoded frames to the Surface
-                drainOutput(c, false)
+            val pts = presentationUs
+            if (flags == 0) {
+                if (latencyMap.size > 120) {
+                    latencyMap.clear()
+                }
+                latencyMap[pts] = System.nanoTime()
+                presentationUs += frameDurationUs
             }
-        } catch (e: InterruptedException) {
-            Log.d(TAG, "Queue thread interrupted (shutdown)")
-        } catch (e: IllegalStateException) {
-            // Thrown when codec is released while dequeueInputBuffer is blocking.
-            // Only report as error if we weren't intentionally stopping.
-            if (isRunning.get()) {
-                Log.e(TAG, "Queue loop codec error: ${e.message}", e)
-                onError("Queue thread error: ${e.message}")
-            } else {
-                Log.d(TAG, "Queue thread: codec stopped during shutdown (expected)")
-            }
+
+            c.queueInputBuffer(idx, 0, chunk.size, pts, flags)
         } catch (e: Exception) {
-            if (isRunning.get()) {
-                Log.e(TAG, "Queue loop error: ${e.message}", e)
-                onError("Queue thread error: ${e.message}")
-            }
+            Log.w(TAG, "writeChunkToInputBuffer error: ${e.message}")
         }
     }
 
-    // ── Output draining ───────────────────────────────────────────────────────
+    private fun handleDecodedOutput(c: MediaCodec, outIdx: Int, info: MediaCodec.BufferInfo) {
+        val queuedTime = latencyMap.remove(info.presentationTimeUs)
+        if (queuedTime != null) {
+            val decodeLatencyNs = System.nanoTime() - queuedTime
+            totalLatencyNs += decodeLatencyNs
+            latencyCount++
+        }
 
-    private fun drainOutput(c: MediaCodec, forceDrop: Boolean) {
-        val bufferInfo = MediaCodec.BufferInfo()
-        while (true) {
-            val outIdx = c.dequeueOutputBuffer(bufferInfo, 0L)  // non-blocking
-            when {
-                outIdx >= 0 -> {
-                    val queuedTime = latencyMap.remove(bufferInfo.presentationTimeUs)
-                    var decodeLatencyNs = 0L
-                    if (queuedTime != null) {
-                        decodeLatencyNs = System.nanoTime() - queuedTime
-                        totalLatencyNs += decodeLatencyNs
-                        latencyCount++
-                    }
-                    framesRendered++
+        framesDequeued++
+        val isSurfaceValid = pendingSurface?.isValid == true
+        val shouldRender = isSurfaceValid && isRunning.get()
 
-                    // Pace to a real 60Hz wall-clock interval regardless of
-                    // how fast frames actually arrive. This gives even 2:1 (or
-                    // N:1) decimation when the source runs faster than the
-                    // panel, instead of dropping only under buffer pressure.
-                    val now = System.nanoTime()
-                    val slackNs = 2_000_000L
-                    val duePaced = (now - lastRenderNs + slackNs) >= renderIntervalNs
-                    
-                    // Dynamic backpressure: if network queue is building up, or the decoder
-                    // or surface is too slow. Drop this frame's render to catch up!
-                    // A threshold of > 2 prevents micro-stutters from dropped frames on Mediatek chips
-                    val isCongested = dataQueue.size > 2
-                    val shouldRender = !forceDrop && duePaced && !isCongested
-
-                    c.releaseOutputBuffer(outIdx, shouldRender)
-                    
-                    if (!firstFrameFired.getAndSet(true)) {
-                        onFirstFrame()
-                    }
-                    
-                    if (shouldRender) {
-                        lastRenderNs = now
-                    }
+        try {
+            c.releaseOutputBuffer(outIdx, shouldRender)
+            if (shouldRender) {
+                framesRendered++
+                if (!firstFrameFired.getAndSet(true)) {
+                    onFirstFrame()
                 }
-                outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    Log.d(TAG, "Output format changed: ${c.outputFormat}")
-                }
-                else -> break  // INFO_TRY_AGAIN_LATER or INFO_OUTPUT_BUFFERS_CHANGED
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "releaseOutputBuffer error: ${e.message}")
         }
     }
 

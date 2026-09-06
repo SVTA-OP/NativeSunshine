@@ -45,8 +45,9 @@ _build_vulkan_pipeline() {
 
     local w="${TARGET_WIDTH:-800}"
     local h="${TARGET_HEIGHT:-1340}"
-    # Cap encoder framerate based on benchmarked limits.
-    local fps="${CLIENT_FRAMERATE:-60}"
+    # Cap encoder framerate based on detected or user-specified refresh rate.
+    local fps="${GUI_FRAMERATE:-${TARGET_REFRESH:-60}}"
+    if (( fps > 60 )); then fps=60; fi
     # NOTE: encoding at the exact target resolution (no manual alignment).
     # H.264 always pads internally to 16px macroblocks and signals the true
     # display size via SPS frame-cropping, so the decoder should see 800x1340
@@ -56,24 +57,17 @@ _build_vulkan_pipeline() {
     # resurfaces here, it's a RADV-specific SPS-cropping bug — fall back to
     # the vaapi or software encoder rather than re-adding alignment math,
     # since re-aligning here just reintroduces the host/decoder size mismatch.
-    #
-    # Explicit framerate: without this, vulkanh264enc has been observed
-    # signaling framerate=120 in the SPS VUI (see h264parse "exceeds allowed
-    # maximum" warnings) regardless of what's actually delivered, which
-    # desyncs its own rate-control/GOP timing model from reality. Pin it to
-    # the real detected refresh so the encoder isn't guessing.
 
     cat <<EOF
 pipewiresrc
     path=${node_id}
     do-timestamp=true
-    keepalive-time=16
   !
   videoconvert n-threads=0
   !
   videoscale method=0
   !
-  videorate
+  videorate max-rate=${fps} drop-only=true skip-to-first=true
   !
   video/x-raw, format=NV12, width=${w}, height=${h}, framerate=${fps}/1
   !
@@ -85,7 +79,10 @@ pipewiresrc
     rate-control=cbr
     bitrate=${bitrate}
     idr-period=${keyint}
+    num-ref-frames=1
+    b-frames=0
     quality=1
+    aud=false
   !
   video/x-h264,
     stream-format=byte-stream,
@@ -109,6 +106,8 @@ _build_nvenc_pipeline() {
     local keyint="${KEYFRAME_INTERVAL:-60}"
     local w="${TARGET_WIDTH:-800}"
     local h="${TARGET_HEIGHT:-1340}"
+    local fps="${GUI_FRAMERATE:-${TARGET_REFRESH:-60}}"
+    if (( fps > 60 )); then fps=60; fi
 
     cat <<EOF
 pipewiresrc
@@ -119,9 +118,9 @@ pipewiresrc
   !
   videoscale method=0
   !
-  videorate
+  videorate max-rate=${fps} drop-only=true skip-to-first=true
   !
-  video/x-raw, width=${w}, height=${h}, framerate=${CLIENT_FRAMERATE:-60}/1
+  video/x-raw, width=${w}, height=${h}, framerate=${fps}/1
   !
   queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
   !
@@ -131,6 +130,7 @@ pipewiresrc
     rc-mode=cbr
     preset=low-latency-hq
     zerolatency=true
+    bframes=0
     aud=false
   !
   video/x-h264,
@@ -155,6 +155,8 @@ _build_software_pipeline() {
     local keyint="${KEYFRAME_INTERVAL:-60}"
     local w="${TARGET_WIDTH:-800}"
     local h="${TARGET_HEIGHT:-1340}"
+    local fps="${GUI_FRAMERATE:-${TARGET_REFRESH:-60}}"
+    if (( fps > 60 )); then fps=60; fi
 
     # x264enc bitrate is in kbit/s
     cat <<EOF
@@ -166,9 +168,9 @@ pipewiresrc
   !
   videoscale method=0
   !
-  videorate
+  videorate max-rate=${fps} drop-only=true skip-to-first=true
   !
-  video/x-raw, format=I420, width=${w}, height=${h}, framerate=${CLIENT_FRAMERATE:-60}/1
+  video/x-raw, format=I420, width=${w}, height=${h}, framerate=${fps}/1
   !
   queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
   !
@@ -178,6 +180,10 @@ pipewiresrc
     tune=zerolatency
     speed-preset=ultrafast
     pass=cbr
+    bframes=0
+    sliced-threads=true
+    sync-lookahead=0
+    rc-lookahead=0
     aud=false
     threads=4
   !
@@ -203,6 +209,8 @@ _build_vaapi_pipeline() {
     local keyint="${KEYFRAME_INTERVAL:-60}"
     local w="${TARGET_WIDTH:-800}"
     local h="${TARGET_HEIGHT:-1340}"
+    local fps="${GUI_FRAMERATE:-${TARGET_REFRESH:-60}}"
+    if (( fps > 60 )); then fps=60; fi
 
     cat <<EOF
 pipewiresrc
@@ -211,9 +219,9 @@ pipewiresrc
   !
   vapostproc
   !
-  videorate
+  videorate max-rate=${fps} drop-only=true skip-to-first=true
   !
-  video/x-raw, width=${w}, height=${h}, framerate=${CLIENT_FRAMERATE:-60}/1
+  video/x-raw, width=${w}, height=${h}, framerate=${fps}/1
   !
   queue max-size-buffers=1 leaky=downstream max-size-bytes=0 max-size-time=0
   !
@@ -221,6 +229,9 @@ pipewiresrc
     bitrate=${bitrate}
     key-int-max=${keyint}
     rate-control=cbr
+    ref-frames=1
+    target-usage=7
+    b-frames=0
   !
   video/x-h264,
     stream-format=byte-stream,
@@ -244,6 +255,14 @@ build_pipeline_string() {
     local port="$2"
     local encoder="${ENCODER:-vulkan}"
     local scale="${RESOLUTION_SCALE:-100}"
+
+    # Cap framerate to 60fps to prevent client decoder buffer pool starvation and freezing
+    local cur_fps="${GUI_FRAMERATE:-${TARGET_REFRESH:-60}}"
+    if (( cur_fps > 60 )); then
+        cur_fps=60
+    fi
+    export GUI_FRAMERATE="$cur_fps"
+    export TARGET_REFRESH="$cur_fps"
 
     if [ "$scale" -lt 100 ]; then
         local orig_w="${TARGET_WIDTH:-800}"
@@ -313,7 +332,7 @@ launch_pipeline() {
     export GST_PID=$!
 
     # Start socat reading from the pipe and forwarding to Android
-    socat - "TCP:127.0.0.1:${port},nodelay" <"$fifo" &
+    socat - "TCP:127.0.0.1:${port},nodelay,sndbuf=32768,rcvbuf=32768" <"$fifo" &
     export PIPELINE_PID=$!
 
     # Clean up the fifo path (the pipe stays open via FDs)

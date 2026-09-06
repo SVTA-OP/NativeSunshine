@@ -153,9 +153,15 @@ get_client_display_metrics() {
         log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${refresh_rate:-Unknown}Hz)"
         log_info "Using manual refresh rate: ${TARGET_REFRESH}Hz"
     else
-        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${TARGET_REFRESH}Hz)"
-        # TARGET_REFRESH=$(printf "%.0f" "$refresh_rate")
-        # TARGET_REFRESH=120
+        TARGET_REFRESH=60
+        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${refresh_rate:-Unknown}Hz)"
+        log_info "Target refresh rate set to: ${TARGET_REFRESH}Hz"
+    fi
+    
+    # Cap refresh rate to 60Hz to prevent client decoder buffer pool freeze on 120Hz panels
+    if [[ "${TARGET_REFRESH}" -gt 60 ]]; then
+        TARGET_REFRESH=60
+        log_info "Capped refresh rate to 60Hz to maintain stream stability"
     fi
     
     return 0
