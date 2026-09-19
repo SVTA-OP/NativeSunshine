@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Dynamic Orientation / Rotation Sync**: Restored device rotation tracking. The Android app's physical orientation changes are now instantly propagated to the Linux host, dynamically rotating the GNOME virtual monitor in real-time.
+
+### Changed
+- **120 FPS Uncapped Pipeline**: Removed all hardcoded 60 FPS limitations across both the Android receiver app (display refresh rate locks, codec buffer pacing) and the Linux host pipeline (GStreamer framerate constraints). The stream now natively operates up to 120 FPS depending on your device's refresh rate.
+
+### Fixed
+- **Config Overrides**: Fixed an issue where legacy `framerate: 60` settings in `~/.config/native-sunshine/config.json` would improperly throttle dynamic framerates.
+- **Top-Level Bash Variable Fix**: Fixed a syntax error involving the `local` keyword being used in the main body of `native-sunshine.sh`.
+
 ## [1.0.0] - 2026-09-02
 
 ### Added

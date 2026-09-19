@@ -139,7 +139,8 @@ get_client_display_metrics() {
             export TARGET_HEIGHT="$h"
         fi
         
-        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation:-0})"
+        export TARGET_ORIENTATION="${orientation:-0}"
+        log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${TARGET_ORIENTATION})"
     else
         log_warn "Could not fetch device resolution, falling back to ${TARGET_WIDTH}x${TARGET_HEIGHT}"
     fi
@@ -153,15 +154,9 @@ get_client_display_metrics() {
         log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${refresh_rate:-Unknown}Hz)"
         log_info "Using manual refresh rate: ${TARGET_REFRESH}Hz"
     else
-        TARGET_REFRESH=60
+        TARGET_REFRESH=120
         log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${refresh_rate:-Unknown}Hz)"
         log_info "Target refresh rate set to: ${TARGET_REFRESH}Hz"
-    fi
-    
-    # Cap refresh rate to 60Hz to prevent client decoder buffer pool freeze on 120Hz panels
-    if [[ "${TARGET_REFRESH}" -gt 60 ]]; then
-        TARGET_REFRESH=60
-        log_info "Capped refresh rate to 60Hz to maintain stream stability"
     fi
     
     return 0

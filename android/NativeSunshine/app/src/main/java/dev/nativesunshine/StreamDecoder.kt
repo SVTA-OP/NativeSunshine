@@ -12,6 +12,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 private const val TAG = "NS:StreamDecoder"
 
@@ -55,11 +56,15 @@ class StreamDecoder(
 
     private val bufferLock = Any()
 
+    // Count of frames submitted to MediaCodec that have not yet been
+    // returned via onOutputBufferAvailable (for telemetry/stats).
+    private val inFlightFrames = AtomicInteger(0)
+
     // Queue of byte arrays from SocketReader when codec input buffers are busy.
-    // Capacity 8 buffers absorbs USB packet clustering without dropping P-frames
-    // while keeping max buffering bounded to ~130ms in catastrophic congestion.
-    private val dataQueue = ArrayBlockingQueue<ByteArray>(8)
+    // Capped to 3 frames (~50ms at 60fps) to bound max queued latency.
+    private val dataQueue = ArrayBlockingQueue<ByteArray>(3)
     private val availableInputBuffers = ConcurrentLinkedQueue<Int>()
+    private var lastPtsUs = 0L
 
     // Performance tracking
     private var framesDequeued = 0
@@ -72,13 +77,15 @@ class StreamDecoder(
     private var totalLatencyNs = 0L
     private var latencyCount = 0
 
-    private val targetFps = refreshRate.coerceAtMost(60f)
+    private val targetFps = refreshRate
     private var presentationUs = 0L
     private val frameDurationUs = (1_000_000L / targetFps).toLong()
+    private var baseTimeNs = 0L
 
     // NAL unit framing buffers
     private val frameBuf = ByteArray(2 * 1024 * 1024) // 2MB max frame
     private var frameBufLen = 0
+    private var hasVclInFrame = false
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -102,10 +109,14 @@ class StreamDecoder(
         synchronized(bufferLock) {
             dataQueue.clear()
             availableInputBuffers.clear()
+            inFlightFrames.set(0)
         }
         latencyMap.clear()
         frameBufLen = 0
+        hasVclInFrame = false
         presentationUs = 0L
+        lastPtsUs = 0L
+        baseTimeNs = System.nanoTime()
         pendingSurface = surface
         codecConfigured = false
 
@@ -120,106 +131,128 @@ class StreamDecoder(
         if (frameBufLen + length > frameBuf.size) {
             Log.e(TAG, "Frame buffer overflow! Dropping corrupted stream data.")
             frameBufLen = 0
+            hasVclInFrame = false
         }
         
         System.arraycopy(buf, offset, frameBuf, frameBufLen, length)
         frameBufLen += length
         
-        var lastStartIdx = -1
-        var lastAdvance = 0
         var searchIdx = 0
         while (searchIdx <= frameBufLen - 3) {
             if (frameBuf[searchIdx] == 0.toByte() && frameBuf[searchIdx+1] == 0.toByte() && frameBuf[searchIdx+2] == 1.toByte()) {
-                lastStartIdx = searchIdx
-                lastAdvance = 3
+                var startCodeIdx = searchIdx
                 if (searchIdx > 0 && frameBuf[searchIdx - 1] == 0.toByte()) {
-                    lastStartIdx = searchIdx - 1
-                    lastAdvance = 4
+                    startCodeIdx = searchIdx - 1
+                }
+                val nalStart = searchIdx + 3
+                
+                if (nalStart >= frameBufLen) {
+                    break
+                }
+                
+                val nalType = frameBuf[nalStart].toInt() and 0x1F
+                var isNewAu = false
+                
+                if (hasVclInFrame) {
+                    if (nalType == 9 || nalType == 7 || nalType == 8 || nalType == 6 || nalType == 14) {
+                        isNewAu = true
+                    } else if (nalType == 1 || nalType == 5) {
+                        if (nalStart + 1 < frameBufLen) {
+                            val firstMbBit = frameBuf[nalStart + 1].toInt() and 0x80
+                            if (firstMbBit != 0) {
+                                isNewAu = true
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                }
+                
+                if (isNewAu) {
+                    val frame = frameBuf.copyOfRange(0, startCodeIdx)
+                    processExtractedFrame(frame)
+                    
+                    val remaining = frameBufLen - startCodeIdx
+                    System.arraycopy(frameBuf, startCodeIdx, frameBuf, 0, remaining)
+                    frameBufLen = remaining
+                    hasVclInFrame = false
+                    searchIdx = 0
+                    continue
+                }
+                
+                if (nalType == 1 || nalType == 5) {
+                    hasVclInFrame = true
                 }
             }
             searchIdx++
         }
         
-        if (lastStartIdx > 0) {
-            // Extract all NAL units up to the last start code as a single chunk
-            val frame = frameBuf.copyOfRange(0, lastStartIdx)
+        bytesReceived += length
+        checkStats()
+    }
 
-            if (!codecConfigured) {
-                // Scan the chunk to find the SPS start code
-                var spsStart = -1
-                var i = 0
-                while (i <= frame.size - 4) {
-                    if (frame[i] == 0.toByte() && frame[i+1] == 0.toByte() && frame[i+2] == 1.toByte()) {
-                        val nalType = frame[i+3].toInt() and 0x1F
-                        if (nalType == 7) {
-                            spsStart = if (i > 0 && frame[i-1] == 0.toByte()) i - 1 else i
-                            break
-                        }
+    private fun processExtractedFrame(frame: ByteArray) {
+        if (!codecConfigured) {
+            // Scan the chunk to find the SPS start code
+            var spsStart = -1
+            var i = 0
+            while (i <= frame.size - 4) {
+                if (frame[i] == 0.toByte() && frame[i+1] == 0.toByte() && frame[i+2] == 1.toByte()) {
+                    val nalType = frame[i+3].toInt() and 0x1F
+                    if (nalType == 7) {
+                        spsStart = if (i > 0 && frame[i-1] == 0.toByte()) i - 1 else i
+                        break
                     }
-                    i++
                 }
-                
-                if (spsStart >= 0) {
-                    val sclen = getStartCodeLen(frame, spsStart, frame.size)
-                    if (sclen > 0) {
-                        val dims = parseSpsDimensions(frame, spsStart + sclen)
-                        val surface = pendingSurface
-                        if (dims != null && surface != null) {
-                            try {
-                                setupCodec(surface, dims.first, dims.second)
-                                codecConfigured = true
-                                Log.i(TAG, "Async decoder started")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Codec setup failed: ${e.message}", e)
-                                isRunning.set(false)
-                                onError("Codec setup failed: ${e.message}")
-                                return
-                            }
-                        } else {
-                            Log.w(TAG, "Could not parse SPS dimensions — waiting for next SPS")
+                i++
+            }
+            
+            if (spsStart >= 0) {
+                val sclen = getStartCodeLen(frame, spsStart, frame.size)
+                if (sclen > 0) {
+                    val dims = parseSpsDimensions(frame, spsStart + sclen)
+                    val surface = pendingSurface
+                    if (dims != null && surface != null) {
+                        try {
+                            setupCodec(surface, dims.first, dims.second)
+                            codecConfigured = true
+                            Log.i(TAG, "Async decoder started")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Codec setup failed: ${e.message}", e)
+                            isRunning.set(false)
+                            onError("Codec setup failed: ${e.message}")
+                            return
                         }
+                    } else {
+                        Log.w(TAG, "Could not parse SPS dimensions — waiting for next SPS")
                     }
                 }
             }
+        }
 
-            if (codecConfigured) {
-                val c = codec
-                var handled = false
-                if (c != null && isRunning.get()) {
-                    var idx: Int? = null
-                    synchronized(bufferLock) {
-                        idx = availableInputBuffers.poll()
-                        if (idx == null) {
-                            if (!dataQueue.offer(frame)) {
-                                Log.w(TAG, "Input queue full (8 frames buffered), dropping frame")
-                                framesDroppedCongested++
-                            }
-                            handled = true
-                        }
-                    }
+        if (codecConfigured) {
+            val c = codec
+            if (c != null && isRunning.get()) {
+                synchronized(bufferLock) {
+                    val idx = availableInputBuffers.poll()
                     if (idx != null) {
-                        writeChunkToInputBuffer(c, idx!!, frame)
-                        handled = true
-                    }
-                }
-                if (!handled) {
-                    synchronized(bufferLock) {
+                        inFlightFrames.incrementAndGet()
+                        val ok = writeChunkToInputBuffer(c, idx, frame)
+                        if (!ok) {
+                            inFlightFrames.decrementAndGet()
+                            availableInputBuffers.offer(idx)
+                        }
+                    } else {
                         if (!dataQueue.offer(frame)) {
-                            Log.w(TAG, "Input queue full (8 frames buffered), dropping frame")
+                            Log.w(TAG, "Input queue full (3 frames queued), dropping oldest")
+                            dataQueue.poll()       // discard oldest queued frame
+                            dataQueue.offer(frame)  // keep the newest one
                             framesDroppedCongested++
                         }
                     }
                 }
             }
-            
-            // Shift the remaining data (including the last start code) to the beginning
-            val remaining = frameBufLen - lastStartIdx
-            System.arraycopy(frameBuf, lastStartIdx, frameBuf, 0, remaining)
-            frameBufLen = remaining
         }
-        
-        bytesReceived += length
-        checkStats()
     }
 
     private fun checkStats() {
@@ -227,7 +260,7 @@ class StreamDecoder(
         if (now - lastStatsTime >= 1000) {
             val mbps = (bytesReceived * 8f) / 1_000_000f
             val avgLatencyMs = if (latencyCount > 0) (totalLatencyNs / latencyCount) / 1_000_000L else 0L
-            Log.i(TAG, "Stats: rendered=$framesRendered, dequeued=$framesDequeued, droppedPacing=$framesDroppedPacing, droppedCongested=$framesDroppedCongested, dataQ=${dataQueue.size}, ${"%.2f".format(mbps)} Mbps, ${avgLatencyMs}ms latency")
+            Log.i(TAG, "Stats: rendered=$framesRendered, dequeued=$framesDequeued, inFlight=${inFlightFrames.get()}, droppedPacing=$framesDroppedPacing, droppedCongested=$framesDroppedCongested, dataQ=${dataQueue.size}, ${"%.2f".format(mbps)} Mbps, ${avgLatencyMs}ms latency")
             onStatsUpdate?.invoke(framesRendered, mbps, avgLatencyMs)
             framesDequeued = 0
             framesRendered = 0
@@ -247,6 +280,7 @@ class StreamDecoder(
         synchronized(bufferLock) {
             dataQueue.clear()
             availableInputBuffers.clear()
+            inFlightFrames.set(0)
         }
         latencyMap.clear()
         codecConfigured = false
@@ -496,18 +530,25 @@ class StreamDecoder(
     }
 
     private fun onInputBufferReady(mc: MediaCodec, inputIndex: Int) {
-        val chunk = synchronized(bufferLock) {
-            dataQueue.poll()
-        } ?: run {
-            availableInputBuffers.offer(inputIndex)
-            return
+        if (!isRunning.get()) return
+        synchronized(bufferLock) {
+            val chunk = dataQueue.poll()
+            if (chunk != null) {
+                inFlightFrames.incrementAndGet()
+                val ok = writeChunkToInputBuffer(mc, inputIndex, chunk)
+                if (!ok) {
+                    inFlightFrames.decrementAndGet()
+                    availableInputBuffers.offer(inputIndex)
+                }
+            } else {
+                availableInputBuffers.offer(inputIndex)
+            }
         }
-        writeChunkToInputBuffer(mc, inputIndex, chunk)
     }
 
-    private fun writeChunkToInputBuffer(c: MediaCodec, idx: Int, chunk: ByteArray) {
-        try {
-            val inputBuf = c.getInputBuffer(idx) ?: return
+    private fun writeChunkToInputBuffer(c: MediaCodec, idx: Int, chunk: ByteArray): Boolean {
+        return try {
+            val inputBuf = c.getInputBuffer(idx) ?: return false
             inputBuf.clear()
             inputBuf.put(chunk)
 
@@ -516,16 +557,22 @@ class StreamDecoder(
             // them causes MediaTek Codec2 to treat it as a stream reconfiguration,
             // flushing in-flight work and discarding frames. MediaCodec decodes inline
             // Annex-B NAL units directly with flags = 0.
-            val pts = presentationUs
+            var pts = (System.nanoTime() - baseTimeNs) / 1000
+            if (pts <= lastPtsUs) {
+                pts = lastPtsUs + 1
+            }
+            lastPtsUs = pts
+
             if (latencyMap.size > 120) {
                 latencyMap.clear()
             }
             latencyMap[pts] = System.nanoTime()
-            presentationUs += frameDurationUs
 
             c.queueInputBuffer(idx, 0, chunk.size, pts, 0 /* flags */)
+            true
         } catch (e: Exception) {
             Log.w(TAG, "writeChunkToInputBuffer error: ${e.message}")
+            false
         }
     }
 
@@ -537,13 +584,14 @@ class StreamDecoder(
             latencyCount++
         }
 
+        inFlightFrames.decrementAndGet()
         framesDequeued++
         val isSurfaceValid = pendingSurface?.isValid == true
-        // Dynamic backpressure: if network frames are piling up in dataQueue (> 1),
-        // skip rendering this older frame to prevent SurfaceFlinger buffer bloat and
-        // vsync cascade latency. MediaCodec still decodes it internally so H.264 P-frame
-        // reference integrity is 100% maintained.
-        val isCongested = dataQueue.size > 1
+        // Dynamic backpressure: skip render only when genuinely congested (3+ frames
+        // queued = ~50ms behind). 1-2 frames in the queue is normal pipeline overlap
+        // between the socket-read thread and MediaCodec callback thread.
+        // MediaCodec still decodes skipped frames so P-frame references stay intact.
+        val isCongested = dataQueue.size >= 3
         val shouldRender = isSurfaceValid && isRunning.get() && !isCongested
 
         try {

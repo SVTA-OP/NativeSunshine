@@ -103,7 +103,7 @@ class ReceiverService : Service() {
         Thread {
             try {
                 val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
-                val fps = (prefs.getString("host_fps", "60")?.toIntOrNull() ?: 60).coerceIn(1, 60)
+                val fps = (prefs.getString("host_fps", "120")?.toIntOrNull() ?: 120).coerceIn(1, 120)
                 val bitrate = prefs.getString("host_bitrate", "8000")?.toIntOrNull() ?: 8000
                 
                 val json = """{"fps":$fps,"bitrate":$bitrate}"""

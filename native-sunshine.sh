@@ -214,10 +214,12 @@ setup_adb_forward || exit 1
 log_step "Step 3/5 — Virtual display"
 verify_virtual_display || exit 1
 
-# Apply configured display placement
-if [[ -n "${PLACEMENT:-}" ]]; then
-    log_info "Applying virtual monitor placement: ${PLACEMENT}"
-    python3 "${SCRIPT_DIR}/lib/placement_manager.py" "${PLACEMENT}" || log_warn "Failed to apply display placement"
+# Apply configured display placement and orientation
+if [[ -n "${PLACEMENT:-}" ]] || [[ -n "${TARGET_ORIENTATION:-}" ]]; then
+    place="${PLACEMENT:-current}"
+    orient="${TARGET_ORIENTATION:-0}"
+    log_info "Applying virtual monitor placement: ${place}, orientation: ${orient}"
+    python3 "${SCRIPT_DIR}/lib/placement_manager.py" "${place}" "${orient}" || log_warn "Failed to apply display placement"
 fi
 
 # -----------------------------------------------------------------------------

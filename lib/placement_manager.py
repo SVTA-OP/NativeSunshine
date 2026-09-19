@@ -4,10 +4,11 @@ import dbus
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 placement_manager.py [left|right|above|below|disable]")
+        print("Usage: python3 placement_manager.py [left|right|above|below|disable|current] [orientation]")
         sys.exit(1)
         
     placement = sys.argv[1].lower()
+    target_orientation = int(sys.argv[2]) if len(sys.argv) >= 3 else 0
 
     bus = dbus.SessionBus()
     
@@ -68,7 +69,7 @@ def main():
             
         # The virtual monitor exists but is disabled (not in logical layout).
         # We append a default logical monitor for it so it gets enabled.
-        virtual_lm = (0, 0, 1.0, 0, False, [(virtual_connector, "", {})], {})
+        virtual_lm = (0, 0, 1.0, target_orientation, False, [(virtual_connector, "", {})], {})
         # Note: logical_monitors is a dbus.Array, we can just append to a list copy or directly use it
         logical_monitors = list(logical_monitors)
         logical_monitors.append(virtual_lm)
@@ -149,6 +150,9 @@ def main():
     elif placement == "below":
         nx = px
         ny = py + p_height
+    elif placement == "current":
+        nx = vx
+        ny = vy
 
     min_x = min([nx] + [lm[0] for lm in logical_monitors if lm != virtual_lm])
     min_y = min([ny] + [lm[1] for lm in logical_monitors if lm != virtual_lm])
@@ -161,7 +165,7 @@ def main():
     for lm in logical_monitors:
         lx, ly, lscale, ltransform, lprimary, llinked, lprops = lm
         if lm == virtual_lm:
-            new_logical_monitors.append((dbus.Int32(nx + x_offset), dbus.Int32(ny + y_offset), lscale, ltransform, lprimary, llinked))
+            new_logical_monitors.append((dbus.Int32(nx + x_offset), dbus.Int32(ny + y_offset), lscale, dbus.UInt32(target_orientation), lprimary, llinked))
         else:
             new_logical_monitors.append((dbus.Int32(lx + x_offset), dbus.Int32(ly + y_offset), lscale, ltransform, lprimary, llinked))
 
