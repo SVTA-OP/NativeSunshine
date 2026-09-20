@@ -30,7 +30,7 @@
             android:exported="true"
             android:keepScreenOn="true"
             android:launchMode="singleTop"
-            android:screenOrientation="userPortrait"
+            android:screenOrientation="fullUser"
             android:windowSoftInputMode="stateHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

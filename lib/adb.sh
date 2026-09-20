@@ -127,9 +127,12 @@ get_client_display_metrics() {
         # w=$(( (w / 16) * 16 ))
         # h=$(( (h / 16) * 16 ))
         
-        # Get Orientation
+        # Get Orientation (Try dumpsys input first, fallback to dumpsys window for Samsung/Android 14+)
         local orientation
         orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys input 2>/dev/null | grep SurfaceOrientation | head -1 | awk '{print $2}')
+        if [[ -z "$orientation" ]]; then
+            orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys window displays 2>/dev/null | grep -o 'mRotation=[0-9]' | head -1 | cut -d= -f2)
+        fi
         
         if [[ "$orientation" == "1" || "$orientation" == "3" ]]; then
             export TARGET_WIDTH="$h"
@@ -172,11 +175,18 @@ watch_client_orientation() {
     # Get initial orientation
     local current_orientation
     current_orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys input 2>/dev/null | grep SurfaceOrientation | head -1 | awk '{print $2}')
+    if [[ -z "$current_orientation" ]]; then
+        current_orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys window displays 2>/dev/null | grep -o 'mRotation=[0-9]' | head -1 | cut -d= -f2)
+    fi
     
     while true; do
         sleep 2
         local new_orientation
         new_orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys input 2>/dev/null | grep SurfaceOrientation | head -1 | awk '{print $2}')
+        if [[ -z "$new_orientation" ]]; then
+            new_orientation=$("${ADB_BIN:-adb}" -s "$serial" shell dumpsys window displays 2>/dev/null | grep -o 'mRotation=[0-9]' | head -1 | cut -d= -f2)
+        fi
+        
         if [[ -n "$new_orientation" && "$new_orientation" != "$current_orientation" ]]; then
             log_info "Orientation changed ($current_orientation -> $new_orientation). Restarting pipeline..."
             kill -SIGUSR1 "$main_pid"

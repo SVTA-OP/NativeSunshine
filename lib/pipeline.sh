@@ -265,10 +265,25 @@ build_pipeline_string() {
         local orig_h="${TARGET_HEIGHT:-1340}"
         local new_w=$(( orig_w * scale / 100 ))
         local new_h=$(( orig_h * scale / 100 ))
-        # Ensure dimensions are even (required by most video encoders)
-        export TARGET_WIDTH=$(( new_w + (new_w % 2) ))
-        export TARGET_HEIGHT=$(( new_h + (new_h % 2) ))
+        export TARGET_WIDTH=$new_w
+        export TARGET_HEIGHT=$new_h
     fi
+
+    # Align dimensions to 32px boundaries to prevent hardware encoder failures 
+    # (especially Vulkan RADV) on unaligned resolutions like 1340.
+    local align_w="${TARGET_WIDTH:-800}"
+    local rem_w=$(( align_w % 32 ))
+    if [ $rem_w -ne 0 ]; then
+        if [ $rem_w -ge 16 ]; then align_w=$(( align_w + 32 - rem_w )); else align_w=$(( align_w - rem_w )); fi
+    fi
+    export TARGET_WIDTH="$align_w"
+
+    local align_h="${TARGET_HEIGHT:-1340}"
+    local rem_h=$(( align_h % 32 ))
+    if [ $rem_h -ne 0 ]; then
+        if [ $rem_h -ge 16 ]; then align_h=$(( align_h + 32 - rem_h )); else align_h=$(( align_h - rem_h )); fi
+    fi
+    export TARGET_HEIGHT="$align_h"
 
     case "$encoder" in
         vulkan)    _build_vulkan_pipeline    "$node_id" "$port" ;;
