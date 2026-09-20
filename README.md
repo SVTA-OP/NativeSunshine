@@ -2,7 +2,7 @@
 
 **Use your Android device as a secondary monitor over USB-C — no Wi-Fi, no network, no third-party streaming protocol.**
 
-All pixel data travels through the physical USB-C cable via the ADB daemon.
+All pixel data travels through the physical USB-C cable via the ADB daemon. Features zero-latency hardware encoding, dynamic device rotation sync, and uncapped up to 120 FPS native streaming.
 
 ```
 Linux Host (Wayland/GNOME)          Android Device
