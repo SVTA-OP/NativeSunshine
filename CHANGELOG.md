@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-06
+
+### Documentation
+
+- Updated `CODEBASE_GRAPH.md` to reflect the v1.2.0 architecture, current defaults, display scaling, and decoder error recovery.
+
 ## [1.2.0] - 2026-11-06
 
 ### Added
