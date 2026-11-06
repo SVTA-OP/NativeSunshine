@@ -28,6 +28,7 @@ ENCODER=software
 STREAM_BITRATE=8000
 KEYFRAME_INTERVAL=60
 RESOLUTION_SCALE=100
+VIRTUAL_SCALE=100
 PLACEMENT="right"
 
 # Try to load overrides from the GUI config
@@ -38,6 +39,7 @@ if [[ -f "$GUI_CONFIG" ]]; then
     GUI_FRAMERATE=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('framerate', 0))" "$GUI_CONFIG")
     KEYFRAME_INTERVAL=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('keyframe_interval', 60))" "$GUI_CONFIG")
     RESOLUTION_SCALE=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('resolution_scale', 100))" "$GUI_CONFIG")
+    VIRTUAL_SCALE=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('virtual_scale', 100))" "$GUI_CONFIG")
     PLACEMENT=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('placement', 'right'))" "$GUI_CONFIG")
 fi
 

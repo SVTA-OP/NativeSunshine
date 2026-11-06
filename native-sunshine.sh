@@ -112,9 +112,12 @@ teardown() {
     pkill -f "lib/control_server.py" 2>/dev/null || true
     pkill -f "lib/mutter_record_virtual.py" 2>/dev/null || true
 
-    # Kill orientation watcher
+    # Kill orientation watcher and decoder monitor
     if [[ -n "${ORIENTATION_WATCHER_PID:-}" ]]; then
         kill "$ORIENTATION_WATCHER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${DECODER_LOGCAT_PID:-}" ]]; then
+        kill "$DECODER_LOGCAT_PID" 2>/dev/null || true
     fi
 
     # 3. Remove ADB port forwards
@@ -132,10 +135,11 @@ restart_pipeline() {
     set +e
     trap '' EXIT INT TERM SIGUSR1
     _NS_TEARDOWN_CALLED=1
-    log_info "Settings updated via control channel. Restarting..."
+    log_info "Restarting pipeline..."
     stop_pipeline "${PIPELINE_PID:-}"
     kill "${CONTROL_SERVER_PID:-}" 2>/dev/null || true
     kill "${ORIENTATION_WATCHER_PID:-}" 2>/dev/null || true
+    kill "${DECODER_LOGCAT_PID:-}" 2>/dev/null || true
     exec "$0" "$@"
 }
 trap restart_pipeline SIGUSR1
@@ -215,11 +219,12 @@ log_step "Step 3/5 — Virtual display"
 verify_virtual_display || exit 1
 
 # Apply configured display placement and orientation
-if [[ -n "${PLACEMENT:-}" ]] || [[ -n "${TARGET_ORIENTATION:-}" ]]; then
+if [[ -n "${PLACEMENT:-}" ]] || [[ -n "${TARGET_ORIENTATION:-}" ]] || [[ -n "${VIRTUAL_SCALE:-}" ]]; then
     place="${PLACEMENT:-current}"
     orient="${TARGET_ORIENTATION:-0}"
-    log_info "Applying virtual monitor placement: ${place}, orientation: ${orient}"
-    python3 "${SCRIPT_DIR}/lib/placement_manager.py" "${place}" "${orient}" || log_warn "Failed to apply display placement"
+    v_scale="${VIRTUAL_SCALE:-100}"
+    log_info "Applying virtual monitor placement: ${place}, orientation: ${orient}, scale: ${v_scale}%"
+    python3 "${SCRIPT_DIR}/lib/placement_manager.py" "${place}" "${orient}" "${v_scale}" || log_warn "Failed to apply display placement"
 fi
 
 # -----------------------------------------------------------------------------
@@ -253,6 +258,27 @@ CONTROL_SERVER_PID=$!
 # Start orientation watcher
 watch_client_orientation $$ &
 ORIENTATION_WATCHER_PID=$!
+
+# Monitor Android logcat for decoder callback errors as fallback retry trigger
+watch_decoder_errors() {
+    local main_pid="$1"
+    local serial="${ADB_SERIAL:-}"
+    local adb_cmd=("${ADB_BIN:-adb}")
+    [[ -n "$serial" ]] && adb_cmd+=("-s" "$serial")
+
+    # Stream logcat filtered to StreamDecoder and ReceiverService
+    "${adb_cmd[@]}" logcat -v brief -T 1 -s NS:StreamDecoder NS:ReceiverService 2>/dev/null | \
+    while IFS= read -r line; do
+        if [[ "$line" =~ [Dd]ecoder\ callback\ error.*0x[0-9a-fA-F]+ ]]; then
+            log_warn "Detected decoder error in Android logcat: ${line}"
+            log_info "Retrying connection..."
+            kill -SIGUSR1 "$main_pid" 2>/dev/null || true
+            exit 0
+        fi
+    done
+}
+watch_decoder_errors $$ &
+DECODER_LOGCAT_PID=$!
 
 # -----------------------------------------------------------------------------
 # Wait — keep running until the pipeline exits or we get a signal

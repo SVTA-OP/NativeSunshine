@@ -51,7 +51,7 @@ Or change via the GUI / Android settings (writes `~/.config/native-sunshine/conf
 ## Change bitrate or FPS from Android
 
 1. Open NativeSunshine app → ⚙ Settings
-2. Set "Host FPS" and "Host Bitrate"
+2. Set "Host FPS" (default 60, maximum 120) and "Host Bitrate"
 3. Close Settings — settings are sent automatically on next connection
 
 Or manually send JSON to port 7879 from host:
@@ -59,6 +59,16 @@ Or manually send JSON to port 7879 from host:
 echo '{"fps":30,"bitrate":4000}' | nc 127.0.0.1 7879
 ```
 This will trigger `SIGUSR1` → pipeline restart with new values.
+
+---
+
+## Change virtual display scale
+
+1. Open `./native-sunshine-gui.py`.
+2. Under **Virtual Monitor Settings**, choose a **Display Scale** option. Options are queried from Mutter when available.
+3. Launch or relaunch the stream to apply the selected scale.
+
+The selection is saved as `virtual_scale` in `~/.config/native-sunshine/config.json`.
 
 ---
 

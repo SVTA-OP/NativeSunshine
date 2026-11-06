@@ -1,4 +1,11 @@
-import dbus
+import sys
+try:
+    import dbus
+except ModuleNotFoundError:
+    import os
+    if sys.executable != '/usr/bin/python3' and os.path.exists('/usr/bin/python3'):
+        os.execv('/usr/bin/python3', ['/usr/bin/python3'] + sys.argv)
+    raise
 
 def main():
     bus = dbus.SessionBus()

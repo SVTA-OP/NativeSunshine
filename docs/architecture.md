@@ -55,6 +55,8 @@
 │  ReceiverService → sends JSON {fps, bitrate} on connect                     │
 │  control_server.py (port 7879, host side) → updates config.json             │
 │                               → SIGUSR1 → native-sunshine.sh restarts       │
+│  Decoder callback error → control channel and adb logcat watcher             │
+│                               → SIGUSR1 → reconnect/restart                  │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -76,14 +78,15 @@ native-sunshine.sh (main shell, PID = $$)
 ├── socat  (PIPELINE_PID)       — reads named pipe, writes to TCP 127.0.0.1:7878
 ├── python3 control_server.py   (CONTROL_SERVER_PID)  — listens TCP 7879
 ├── python3 mutter_record_virtual.py (MUTTER_SCREENCAST_PID) — keeps ScreenCast alive
-└── watch_client_orientation subshell (ORIENTATION_WATCHER_PID)
+├── watch_client_orientation subshell (ORIENTATION_WATCHER_PID)
+└── watch_decoder_errors subshell (DECODER_LOGCAT_PID) — watches Android logcat for codec errors
 ```
 
 ## Signal protocol
 
 | Signal | Who sends it | What happens |
 |--------|-------------|--------------|
-| SIGUSR1 | `control_server.py` or `watch_client_orientation` → `kill -SIGUSR1 $$` | `restart_pipeline()` in `native-sunshine.sh`: stops pipeline, re-execs self with same args |
+| SIGUSR1 | `control_server.py`, `watch_client_orientation`, or `watch_decoder_errors` → `kill -SIGUSR1 $$` | `restart_pipeline()` in `native-sunshine.sh`: stops pipeline, re-execs self with same args |
 | SIGINT / SIGTERM | User Ctrl+C or system | `_ns_trap_handler` → `teardown()`: stop pipeline, disable virtual monitor, clear ADB forwards |
 
 ## Named pipe trick
@@ -96,12 +99,15 @@ socat - TCP:... < /tmp/nativesunshine-pipe-XXXX &      PIPELINE_PID=$!
 rm -f /tmp/nativesunshine-pipe-XXXX   # path gone but FDs remain open
 ```
 
-## SIGUSR1 restart flow (settings change / orientation change)
+## SIGUSR1 restart flow (settings, orientation, or decoder error)
 
 ```
-1. Android changes fps or bitrate → sends JSON to 127.0.0.1:7879
-2. control_server.py writes ~/.config/native-sunshine/config.json
-3. os.kill(parent_pid, SIGUSR1)
+1. Settings change: Android sends fps/bitrate JSON to 127.0.0.1:7879;
+   orientation change: host orientation watcher detects it;
+   decoder error: Android reports it over port 7879 and the host logcat watcher
+   independently monitors for the decoder callback error.
+2. Settings changes update ~/.config/native-sunshine/config.json.
+3. The relevant process sends SIGUSR1 to the parent orchestrator.
 4. native-sunshine.sh: restart_pipeline()
    a. Disable all traps (prevent double-teardown)
    b. stop_pipeline (SIGINT → wait → SIGKILL)
@@ -113,6 +119,7 @@ rm -f /tmp/nativesunshine-pipe-XXXX   # path gone but FDs remain open
 ```
 adb shell wm size                    → TARGET_WIDTH × TARGET_HEIGHT
 adb shell dumpsys input SurfaceOrientation → swap W/H if landscape
+adb shell dumpsys display            → detect refresh rate (unless explicitly overridden)
 GStreamer encodes at TARGET_WIDTH × TARGET_HEIGHT
 h264parse emits inline SPS with correct SPS frame-cropping info
 Android: parseSpsDimensions(SPS NAL) → actual width × height
@@ -120,3 +127,5 @@ MediaCodec.configure(format, width, height)  ← always correct
 ```
 
 This is why there is NO hardcoded resolution on the Android side. The SPS is the single source of truth.
+
+The Android app defaults to requesting 60 FPS. When no positive FPS override is set, the host uses the detected panel refresh rate; streaming is capped at 120 FPS.

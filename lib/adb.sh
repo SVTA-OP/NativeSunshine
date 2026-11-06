@@ -157,7 +157,8 @@ get_client_display_metrics() {
         log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${refresh_rate:-Unknown}Hz)"
         log_info "Using manual refresh rate: ${TARGET_REFRESH}Hz"
     else
-        TARGET_REFRESH=120
+        TARGET_REFRESH=${refresh_rate%.*}
+        TARGET_REFRESH=${TARGET_REFRESH:-60}
         log_info "Device native resolution: ${TARGET_WIDTH}x${TARGET_HEIGHT} (Orientation: ${orientation}, ${refresh_rate:-Unknown}Hz)"
         log_info "Target refresh rate set to: ${TARGET_REFRESH}Hz"
     fi

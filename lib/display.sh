@@ -37,7 +37,7 @@ get_pipewire_node_id() {
     
     if [[ "${TARGET_DISPLAY:-virtual}" == "virtual" ]]; then
         local vconn
-        vconn=$(python3 -c "
+        vconn=$(/usr/bin/python3 -c "
 import dbus
 bus = dbus.SessionBus()
 obj = bus.get_object('org.gnome.Mutter.DisplayConfig', '/org/gnome/Mutter/DisplayConfig')

@@ -13,7 +13,7 @@
             app:key="host_fps"
             app:title="Target FPS"
             app:summary="FPS for host pipeline (Max: 120)"
-            app:defaultValue="120"
+            app:defaultValue="60"
             app:useSimpleSummaryProvider="true" />
         <EditTextPreference
             app:key="host_bitrate"

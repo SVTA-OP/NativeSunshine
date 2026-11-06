@@ -69,7 +69,14 @@ def main():
 
                     # Handle Android-side errors
                     if "error" in msg:
-                        print(f"\n[ERROR FROM ANDROID] {msg['error']}\n")
+                        err_str = str(msg['error'])
+                        print(f"\n[ERROR FROM ANDROID] {err_str}\n")
+                        # If decoder encountered a callback error (e.g. CodecException 0x80000000 / 0x0000000),
+                        # signal the parent orchestrator to restart the pipeline and refresh the connection.
+                        if "decoder callback error" in err_str.lower():
+                            print("Decoder callback error detected — signaling parent to restart pipeline")
+                            if parent_pid:
+                                os.kill(parent_pid, signal.SIGUSR1)
                         continue
 
                     # Load current config and check what actually changed

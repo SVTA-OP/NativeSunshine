@@ -2,7 +2,7 @@
 
 **Use your Android device as a secondary monitor over USB-C — no Wi-Fi, no network, no third-party streaming protocol.**
 
-All pixel data travels through the physical USB-C cable via the ADB daemon. Features zero-latency hardware encoding, dynamic device rotation sync, and uncapped up to 120 FPS native streaming.
+All pixel data travels through the physical USB-C cable via the ADB daemon. Features low-latency hardware encoding, dynamic device rotation sync, streaming up to 120 FPS, automatic decoder error recovery, and virtual display scaling. Streaming defaults to 60 FPS; you can request a higher rate in Android settings when supported by both devices.
 
 ```
 Linux Host (Wayland/GNOME)          Android Device
@@ -11,7 +11,7 @@ Virtual display (800×1340)
   │
 PipeWire capture
   │
-AMD VAAPI H.264 encode (8Mbps CBR)
+H.264 encode (8Mbps CBR)
   │
 GStreamer tcpclientsink
   │
@@ -76,9 +76,9 @@ Or use the installer:
    ```bash
    ./native-sunshine-gui.py
    ```
-5. In the GUI, configure your Encoder, Bitrate, and where you want the virtual monitor placed (Left, Right, Above, Below).
+5. In the GUI, configure your Encoder, Bitrate, Display Scale, and where you want the virtual monitor placed (Left, Right, Above, Below).
 6. Click **Launch Stream**. 
-7. The virtual monitor will be dynamically created using the exact native resolution and refresh rate of your connected Android device.
+7. The virtual monitor will use the connected Android device's detected resolution and refresh rate (up to 120 FPS).
 
 *Tip: A desktop shortcut for NativeSunshine is automatically installed by `install.sh`, so you can launch it from your application menu in the future!*
 
@@ -90,6 +90,17 @@ Click **Stop Stream** in the GUI, or close the window. All virtual monitors will
 ## Configuration
 
 Settings are easily managed through the GTK4 GUI (`./native-sunshine-gui.py`) which saves to `~/.config/native-sunshine/config.json`.
+
+The GUI exposes the following settings:
+
+| Setting | Description |
+|---|---|
+| **Encoder** | GStreamer encoder: `vulkan`, `vaapi`, `nvenc`, or `software` (the GUI initially selects `vulkan`; `config.sh` defaults to `software`) |
+| **Bitrate** | H.264 target bitrate in kbps |
+| **Keyframe Interval** | IDR frame period in frames |
+| **Resolution Scale (%)** | Encode at 10–100% of native resolution (reduces decode load on budget hardware) |
+| **Display Scale** | GNOME UI scaling for the virtual monitor. Options are queried from Mutter when available; the GUI offers common fallback scales if that query is unavailable. |
+| **Placement** | Where to place the virtual monitor relative to your primary display: Left, Right, Above, or Below |
 
 Alternatively, advanced users can edit [`config.sh`](config.sh) to adjust low-level paths or ADB ports:
 
@@ -128,6 +139,17 @@ Common causes:
 - Ensure you are using a USB 3.0+ cable and port.
 - Check VAAPI is actually using hardware: `vainfo | grep VAEntrypointEncSliceLP`.
 - **LineageOS/Custom ROMs**: If latency persists, go to Developer Options and turn ON **Disable HW Overlays** to bypass the hardware composer's buffer frame.
+
+### Decoder callback error / stream drops unexpectedly
+NativeSunshine automatically detects Android MediaCodec `Decoder callback error` events and restarts the GStreamer pipeline. If the stream drops and immediately recovers, this is normal self-healing behavior. If restarts recur frequently:
+- Lower the **Bitrate** or **Resolution Scale (%)** to reduce decoder pressure.
+- In Android settings, cap the **Host FPS** to 60 if your device struggles at higher rates.
+- Check `adb logcat -s NS:StreamDecoder` for the exact error code.
+
+The Android **Host FPS** setting defaults to 60. NativeSunshine detects the device's display refresh rate when no explicit FPS is requested and caps the stream at 120 FPS.
+
+### Virtual monitor appears wrong size / GNOME scaling looks off
+Use the **Display Scale** dropdown in the GUI ("Virtual Monitor Settings" section). It shows the scales Mutter reports (e.g. 75%, 100%, 125%), or common fallback options if Mutter cannot be queried. The selected scale is applied when you next launch a stream.
 
 ### `adb: device unauthorized`
 Accept the RSA fingerprint prompt on your Android device's screen.

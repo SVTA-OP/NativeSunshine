@@ -4,16 +4,16 @@ Known bugs, failure modes, and how to diagnose them.
 
 ---
 
-## 120Hz panel freeze (CRITICAL — known bug)
+## Decoder callback errors or freezes at high FPS
 
-**Symptom:** Stream plays for a few seconds then freezes. Android logs show `MediaCodec` output buffers being dropped. May also manifest as the app becoming unresponsive.
+**Symptom:** The stream freezes or disconnects, and Android logs report a `MediaCodec` decoder callback error.
 
-**Root cause:** On 120Hz panels (e.g. Samsung Galaxy Tab A7 Lite's MTK decoder), running `SurfaceFlinger` at 120Hz exhausts the `MediaCodec` buffer pool. The decoder keeps dequeuing output buffers but SurfaceFlinger doesn't consume them fast enough, causing a backlog that starves the codec.
+**Recovery:** NativeSunshine detects decoder callback errors through both the control channel and an Android logcat watcher, then restarts the host pipeline to reconnect. A restart can briefly interrupt the stream.
 
-**Fix (already applied):**
-**GSI Decoder Problem:** On some GSI ROMs or devices (e.g. MediaTek Helio P22T), the hardware decoder physically cannot sustain decoding 120fps video at high resolutions (throwing QMU_ERR inside the MediaCodec loop). If you experience freezes or crashes during stream playback:
-1. Try capping the FPS to 60 in the Android app settings.
-2. Check `adb logcat` for MediaCodec buffer exhaustion or firmware crashes.
+If errors recur, some device decoders may not sustain high frame rates or resolutions:
+1. Lower **Host FPS** to 60 in Android app settings (the default) or lower **Resolution Scale** in the GUI.
+2. Lower the bitrate to reduce stream load.
+3. Check `adb logcat -s NS:StreamDecoder` for the decoder error details.
 
 ---
 

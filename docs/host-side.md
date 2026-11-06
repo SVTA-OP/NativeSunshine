@@ -14,12 +14,13 @@ All files are on the Linux host. They capture the virtual display, encode it as 
 |----------|---------|---------|
 | `TARGET_WIDTH` | 800 | Horizontal resolution of virtual monitor (also encoder output width) |
 | `TARGET_HEIGHT` | 1340 | Vertical resolution. Gets overridden at runtime by `adb.sh` after querying device |
-| `TARGET_REFRESH` | 120 | FPS limit (dynamic up to 120). |
-| `ENCODER` | vulkan | Which GStreamer encoder to use: `vulkan`, `vaapi`, `nvenc`, `software` |
+| `TARGET_REFRESH` | 60 | Fallback FPS; startup detection uses the Android panel refresh rate unless a positive FPS override is configured. Effective stream maximum is 120 FPS. |
+| `ENCODER` | software | `config.sh` default; the GUI initially selects `vulkan`. Options: `vulkan`, `vaapi`, `nvenc`, `software` |
 | `STREAM_BITRATE` | 8000 | H.264 target bitrate in kbps |
 | `KEYFRAME_INTERVAL` | 60 | IDR period in frames. Low = fast recovery after frame drops but slightly bigger stream |
-| `RESOLUTION_SCALE` | 100 | Scale factor (50–100). 80 means encode at 80% of native resolution |
+| `RESOLUTION_SCALE` | 100 | Scale factor (10–100). 80 means encode at 80% of native resolution |
 | `PLACEMENT` | right | Where to put virtual monitor relative to primary: `left`, `right`, `above`, `below` |
+| `VIRTUAL_SCALE` | 100 | GNOME UI scale percentage for the virtual monitor; the GUI queries Mutter for supported values |
 | `ADB_STREAM_PORT` | 7878 | TCP port for video. Must match Android's `ServerSocket` port |
 | `ADB_WAIT_TIMEOUT` | 30 | Seconds to wait for ADB device before aborting |
 | `VAAPI_DEVICE` | /dev/dri/renderD128 | GPU render node (VAAPI encoder only) |
@@ -55,12 +56,12 @@ All files are on the Linux host. They capture the virtual display, encode it as 
 17. launch_pipeline(PIPELINE_STR)  — gst-launch + socat via named pipe
 18. print_stream_info()
 19. Start control_server.py in background
-20. Start watch_client_orientation in background
+20. Start watch_client_orientation and watch_decoder_errors in background
 21. wait $PIPELINE_PID
 ```
 
 **SIGUSR1 handling (`restart_pipeline`):**
-- Triggered by `control_server.py` (settings change) or `watch_client_orientation` (rotation change)
+- Triggered by `control_server.py` (settings or decoder error), `watch_client_orientation` (rotation change), or the Android logcat watcher (decoder callback error)
 - Disables all traps, stops pipeline, does `exec "$0" "$@"` — replaces self entirely so config.sh re-reads the JSON
 
 **teardown():**
@@ -286,7 +287,7 @@ sleep 1  # fast-fail: if both PIDs already dead, something is wrong
 4. `os.kill(parent_pid, signal.SIGUSR1)`
 
 **On error from Android:**
-- Just prints it. Does not restart.
+- Prints the error. A decoder callback error also signals the parent to restart the pipeline and reconnect.
 
 **kill_port(7879):** On startup, kills any process holding 7879 with `fuser -k` to avoid "address already in use".
 
@@ -296,13 +297,16 @@ sleep 1  # fast-fail: if both PIDs already dead, something is wrong
 
 **Role:** Repositions the virtual monitor in the GNOME display layout by calling `org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig`.
 
-**Arguments:** `left | right | above | below | disable`
+**Arguments:** `left | right | above | below | disable`, followed optionally by the orientation and display scale percentage.
 
 **Logic for `right` (default):**
 ```
-nx = primary_x + primary_logical_width
-ny = primary_y
+Place the virtual monitor beside the bounding box of the existing non-virtual
+logical monitors, then probe nearby coordinates to satisfy Mutter's adjacency
+and non-overlap constraints (including fractional-scaled layouts).
 ```
+
+The GUI's **Display Scale** choices are queried from Mutter's supported scale values and stored as `virtual_scale` in the GUI config. If Python cannot import `dbus`, the D-Bus helper scripts re-exec with `/usr/bin/python3` when available.
 
 **Logic for `disable`:**
 - Removes virtual monitor from logical monitors list
@@ -340,7 +344,7 @@ HDMI-A-1|Samsung ODYSSEY
 
 ## `native-sunshine-gui.py`
 
-**Role:** Graphical frontend (GTK). Allows selecting encoder, bitrate, FPS, resolution scale, placement, and display. Writes to `~/.config/native-sunshine/config.json` and launches `native-sunshine.sh` as a subprocess.
+**Role:** Graphical frontend (GTK). Allows selecting encoder, bitrate, keyframe interval, resolution scale, monitor placement, and Mutter-supported display scale. Writes to `~/.config/native-sunshine/config.json` and launches `native-sunshine.sh` as a subprocess. When stopping, it waits briefly for shutdown and force-terminates a process that does not exit, so the launch button can reset.
 
 Not documented in depth here since the shell + library files are the core of the streaming engine.
 

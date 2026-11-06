@@ -431,7 +431,7 @@ class StreamDecoder(
 
             // Request high operating rate so the VPU clocks up for real-time 60fps decoding
             try {
-                setInteger(MediaFormat.KEY_OPERATING_RATE, 120)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, targetFps.toInt())
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to set KEY_OPERATING_RATE: ${e.message}")
             }

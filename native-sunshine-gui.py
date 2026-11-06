@@ -13,6 +13,46 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 MAIN_SCRIPT = os.path.join(SCRIPT_DIR, "native-sunshine.sh")
 
+def get_mutter_supported_scales():
+    """Query Mutter over DBus for the exact supported scaling options."""
+    try:
+        import dbus
+        bus = dbus.SessionBus()
+        obj = bus.get_object('org.gnome.Mutter.DisplayConfig', '/org/gnome/Mutter/DisplayConfig')
+        iface = dbus.Interface(obj, 'org.gnome.Mutter.DisplayConfig')
+        serial, monitors, logical_monitors, properties = iface.GetCurrentState()
+
+        v_conn = None
+        for m in monitors:
+            conn = m[0][0]
+            if any(k in conn for k in ['Virtual', 'HEADLESS', 'Meta']):
+                v_conn = m
+                break
+
+        scales = []
+        if v_conn:
+            for mode in v_conn[1]:
+                if mode[6].get('is-current') or mode[6].get('is-preferred'):
+                    scales = [float(s) for s in mode[5]]
+                    break
+            if not scales and v_conn[1]:
+                scales = [float(s) for s in v_conn[1][0][5]]
+
+        if not scales:
+            for m in monitors:
+                for mode in m[1]:
+                    if mode[6].get('is-current'):
+                        scales = [float(s) for s in mode[5]]
+                        break
+                if scales:
+                    break
+
+        if scales:
+            return sorted(list(set(scales)))
+    except Exception:
+        pass
+    return [0.5, 0.75, 1.0, 1.25, 1.5]
+
 class NativeSunshineApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id='dev.nativesunshine.Gui')
@@ -25,7 +65,8 @@ class NativeSunshineApp(Adw.Application):
             "bitrate": 8000,
             "keyframe_interval": 60,
             "resolution_scale": 100,
-            "placement": "right"
+            "placement": "right",
+            "virtual_scale": 100
         }
         if os.path.exists(CONFIG_FILE):
             try:
@@ -124,6 +165,34 @@ class NativeSunshineApp(Adw.Application):
         self.placement_combo.connect("notify::selected", self.on_placement_changed)
         group_monitor.add(self.placement_combo)
 
+        # Virtual display scaling combo populated from Mutter
+        raw_scales = get_mutter_supported_scales()
+        self.scale_options = [round(s * 100) for s in raw_scales]
+        scale_labels = []
+        for s in raw_scales:
+            pct = round(s * 100)
+            label = f"{pct}%"
+            if abs(s - 1.0) < 0.001:
+                label += " (100% Default)"
+            scale_labels.append(label)
+
+        self.vscale_model = Gtk.StringList.new(scale_labels)
+        self.vscale_combo = Adw.ComboRow(title="Display Scale", subtitle="Mutter UI scaling percentage for virtual monitor", model=self.vscale_model)
+
+        try:
+            cur_scale = int(self.config.get("virtual_scale", 100))
+            # Find closest available scale option
+            closest_val = min(self.scale_options, key=lambda x: abs(x - cur_scale))
+            active_scale_idx = self.scale_options.index(closest_val)
+            self.vscale_combo.set_selected(active_scale_idx)
+        except (ValueError, TypeError):
+            # fallback to 100% if available, else 0
+            default_idx = self.scale_options.index(100) if 100 in self.scale_options else 0
+            self.vscale_combo.set_selected(default_idx)
+
+        self.vscale_combo.connect("notify::selected", self.on_virtual_scale_changed)
+        group_monitor.add(self.vscale_combo)
+
         # Launch Button
         self.launch_btn = Gtk.Button(label="Launch Stream")
         self.launch_btn.add_css_class("suggested-action")
@@ -182,11 +251,24 @@ class NativeSunshineApp(Adw.Application):
             self.config["placement"] = self.placement_options[idx]
             self.save_config()
 
+    def on_virtual_scale_changed(self, combo, pspec):
+        idx = combo.get_selected()
+        if idx < len(self.scale_options):
+            self.config["virtual_scale"] = self.scale_options[idx]
+            self.save_config()
+
     def on_launch_clicked(self, btn):
         if self.stream_process and self.stream_process.poll() is None:
             # Stop the stream
-            self.stream_process.send_signal(signal.SIGINT)
-            self.stream_process.wait()
+            try:
+                self.stream_process.send_signal(signal.SIGINT)
+                self.stream_process.wait(timeout=2)
+            except Exception:
+                try:
+                    self.stream_process.kill()
+                    self.stream_process.wait(timeout=1)
+                except Exception:
+                    pass
             self.stream_process = None
             self.launch_btn.set_label("Launch Stream")
             self.launch_btn.remove_css_class("destructive-action")
@@ -199,7 +281,10 @@ class NativeSunshineApp(Adw.Application):
             # Start the stream
             # Clean up old telemetry file
             if os.path.exists("/tmp/native-sunshine-telemetry.json"):
-                os.remove("/tmp/native-sunshine-telemetry.json")
+                try:
+                    os.remove("/tmp/native-sunshine-telemetry.json")
+                except Exception:
+                    pass
             
             # ensure native-sunshine.sh is executable
             os.chmod(MAIN_SCRIPT, 0o755)

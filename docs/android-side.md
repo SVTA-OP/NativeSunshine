@@ -36,7 +36,7 @@ Android respects the native refresh rate, running smoothly up to 120Hz depending
 // In surfaceCreated:
 holder.surface.setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
 ```
-Tells SurfaceFlinger what rate this surface produces, so it can mode-switch appropriately.
+The surface frame-rate hint is currently fixed at 120 Hz. The separate host FPS preference defaults to 60, and host requests are clamped to 120 FPS.
 
 ### `SurfaceHolder.Callback` implementation
 
@@ -107,7 +107,7 @@ Runs on a new Thread. Connects to `127.0.0.1:7879` (which the ADB reverse forwar
 Values read from `SharedPreferences` (set in `SettingsActivity`). FPS is clamped to 120.
 
 ### `sendErrorToHost(errorMsg)`
-Same mechanism — sends `{"error": "..."}` to port 7879 so the host can display it in the terminal.
+Same mechanism — sends `{"error": "..."}` to port 7879. The host logs the error and restarts the pipeline when the message is a decoder callback error; the logcat watcher provides a second recovery trigger.
 
 ### `setSurface(surface)`
 Called by `MainActivity`. Updates `currentSurface` (volatile) and calls `streamDecoder?.updateSurface(surface)`.
@@ -224,7 +224,7 @@ Only parses constrained-baseline (profile_idc not in the high-profile list). If 
 ```kotlin
 MediaFormat.createVideoFormat(MIMETYPE_VIDEO_AVC, width, height).apply {
     KEY_PRIORITY = 0         // real-time
-    KEY_OPERATING_RATE = 120 // clock up the VPU
+    KEY_OPERATING_RATE = targetFps.toInt() // use the decoder's configured target rate
     "max-num-reorder-frames" = 0   // no B-frame reorder buffer
     "output-reorder-depth" = 0
     KEY_LOW_LATENCY = 1      // API 30+
@@ -234,7 +234,7 @@ MediaFormat.createVideoFormat(MIMETYPE_VIDEO_AVC, width, height).apply {
 }
 ```
 
-Finds hardware H.264 decoder via `findH264Decoder()`:
+`targetFps` comes from the decoder's `refreshRate` constructor value (60 FPS by default) and is used for both `KEY_FRAME_RATE` and `KEY_OPERATING_RATE`, rather than using a hardcoded 120 for operating rate. Finds hardware H.264 decoder via `findH264Decoder()`:
 - On API 29+: first `info.isHardwareAccelerated` decoder for AVC
 - On older: first non-Google, non-sw decoder for AVC
 
@@ -300,7 +300,7 @@ Calls `codec?.setOutputSurface(surface)` — swaps the render target without sto
 **Role:** Thin wrapper around `PreferenceFragmentCompat`. Shows a settings screen backed by `SharedPreferences`. Settings read by `ReceiverService.sendControlMessage()`:
 
 - `stream_port` (String, default "7878") — TCP port for video stream
-- `host_fps` (String, default "120") — FPS to request from host
+- `host_fps` (String, default "60") — FPS to request from host (maximum 120)
 - `host_bitrate` (String, default "8000") — bitrate in kbps to request from host
 
 ---
